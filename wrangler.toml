@@ -1,0 +1,15 @@
+name = "telegram-schedule-bot"
+main = "dist/index.js"
+compatibility_date = "2024-01-01"
+
+[env.production]
+vars = { ENVIRONMENT = "production" }
+
+[env.development]
+vars = { ENVIRONMENT = "development" }
+
+# Environment variables (set these in Cloudflare dashboard or via wrangler secret)
+# BOT_TOKEN = "your_bot_token"
+# ADMIN_CHAT_ID = "your_admin_chat_id"  
+# SUPABASE_URL = "your_supabase_url"
+# SUPABASE_KEY = "your_supabase_service_key"

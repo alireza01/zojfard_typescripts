@@ -1,0 +1,24 @@
+{
+  "name": "telegram-schedule-bot-ts",
+  "version": "1.0.0",
+  "description": "Persian Telegram Schedule Bot - TypeScript port for Cloudflare Workers",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "tsc",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0",
+    "luxon": "^3.4.4",
+    "jspdf": "^2.5.1",
+    "jspdf-autotable": "^3.8.2"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20231218.0",
+    "@types/luxon": "^3.4.2",
+    "typescript": "^5.3.3",
+    "wrangler": "^3.22.1"
+  }
+}
