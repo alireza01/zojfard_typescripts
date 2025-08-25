@@ -110,6 +110,9 @@ export class TelegramBot {
               await this.commandHandler.handleTeleport(message);
               break;
             case '/broadcast':
+              if (message.chat.type !== 'private' || String(message.chat.id) !== this.config.ADMIN_CHAT_ID) {
+                return;
+              }
               await this.commandHandler.handleBroadcast(message);
               break;
             default:
