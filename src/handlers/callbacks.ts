@@ -1,11 +1,12 @@
-import type { TelegramCallbackQuery, InlineKeyboardMarkup } from '../types';
+import type { TelegramCallbackQuery, InlineKeyboardMarkup, UserState } from '../types';
 import { TelegramService } from '../services/telegram';
 import { DatabaseService } from '../services/database';
 import { PDFService } from '../services/pdf';
 import { StateService } from '../services/state';
+import { AIService } from '../services/ai';
 import { CommandHandler } from './commands';
 import { BOT_MESSAGES, PERSIAN_WEEKDAYS, ENGLISH_WEEKDAYS } from '../config/constants';
-import { getWeekStatus, getPersianDate } from '../utils/persian';
+import { getWeekStatus, getPersianDate, formatSchedulePreview } from '../utils/persian';
 
 export class CallbackHandler {
   private commandHandler: CommandHandler;
@@ -15,6 +16,7 @@ export class CallbackHandler {
     private database: DatabaseService,
     private pdf: PDFService,
     private state: StateService,
+    private ai: AIService,
     private adminChatId: string
   ) {
     this.commandHandler = new CommandHandler(telegram, database, pdf, state, adminChatId);
@@ -67,6 +69,23 @@ export class CallbackHandler {
         await this.handleScheduleSetAskDetails(chatId, messageId, data, user);
       }
       
+      // AI flow callbacks
+      else if (data === "schedule:ai:start") {
+        await this.handleScheduleAIStart(chatId, messageId, user);
+      }
+      else if (data === "schedule:ai:confirm") {
+        await this.handleScheduleAIConfirm(chatId, messageId, user);
+      }
+      else if (data === "schedule:ai:edit") {
+        await this.handleScheduleAIEdit(chatId, messageId, user);
+      }
+      else if (data.startsWith("schedule:ai:edit_lesson:")) {
+        await this.handleScheduleAIEditLesson(chatId, messageId, data, user);
+      }
+      else if (data === "schedule:ai:show_preview") {
+        await this.handleShowAIPreview(chatId, messageId, user);
+      }
+
       // Delete callbacks
       else if (data === "schedule:delete:main") {
         await this.handleScheduleDeleteMain(chatId, messageId, user);
@@ -1351,6 +1370,146 @@ export class CallbackHandler {
     processSchedule(userSchedule.even_week_schedule);
 
     return Array.from(lessonSet).sort();
+  }
+
+  /**
+   * Handles the start of the AI schedule import flow
+   */
+  private async handleScheduleAIStart(chatId: number, messageId: number, user: any): Promise<void> {
+    await this.state.setState(user.id, {
+      name: "awaiting_schedule_text",
+      expireAt: Date.now() + 10 * 60 * 1000, // 10 minutes to paste the text
+    });
+
+    const message = BOT_MESSAGES.SCHEDULE_AI_PROMPT;
+    const replyMarkup: InlineKeyboardMarkup = {
+      inline_keyboard: [
+        [{ text: "❌ لغو و بازگشت", callback_data: "menu:schedule" }]
+      ]
+    };
+
+    await this.telegram.editMessageText(chatId, messageId, message, replyMarkup);
+  }
+
+  private async handleScheduleAIConfirm(chatId: number, messageId: number, user: any): Promise<void> {
+    const userState = await this.state.getState(user.id);
+
+    if (userState?.name !== 'awaiting_ai_confirmation' || !userState.data?.schedule) {
+        await this.telegram.editMessageText(chatId, messageId, "⚠️ این عملیات منقضی شده یا داده‌ای برای ذخیره وجود ندارد. لطفاً دوباره تلاش کنید.");
+        return;
+    }
+
+    try {
+        await this.database.saveFullSchedule(user.id, userState.data.schedule);
+        await this.state.deleteState(user.id);
+
+        const finalText = "✅ برنامه شما با موفقیت ذخیره شد!\n\n" + formatSchedulePreview(userState.data.schedule, "*برنامه نهایی شما:*");
+
+        await this.telegram.editMessageText(chatId, messageId, finalText, {
+            inline_keyboard: [[{ text: "↩️ بازگشت به منوی اصلی", callback_data: "menu:help" }]]
+        });
+
+    } catch (error) {
+        console.error(`[AI Confirm] Error saving schedule for user ${user.id}:`, error);
+        await this.telegram.editMessageText(chatId, messageId, "⚠️ مشکلی در ذخیره برنامه پیش آمد. لطفاً دوباره تلاش کنید.");
+    }
+  }
+
+  private async handleScheduleAIEdit(chatId: number, messageId: number, user: any): Promise<void> {
+    const userState = await this.state.getState(user.id);
+    if (userState?.name !== 'awaiting_ai_confirmation' || !userState.data?.schedule) {
+        await this.telegram.editMessageText(chatId, messageId, "⚠️ این عملیات منقضی شده یا داده‌ای برای ویرایش وجود ندارد. لطفاً دوباره تلاش کنید.");
+        return;
+    }
+
+    const schedule = userState.data.schedule;
+    const keyboardRows: any[] = [];
+    let lessonCount = 0;
+
+    const addLessonsToKeyboard = (weekType: 'odd' | 'even') => {
+        const weekSchedule = weekType === 'odd' ? schedule.odd_week_schedule : schedule.even_week_schedule;
+        const weekLabel = weekType === 'odd' ? 'فرد' : 'زوج';
+
+        for (const day of ENGLISH_WEEKDAYS) {
+            if (weekSchedule[day] && weekSchedule[day].length > 0) {
+                const dayLabel = PERSIAN_WEEKDAYS[ENGLISH_WEEKDAYS.indexOf(day)];
+                weekSchedule[day].forEach((lesson: any, index: number) => {
+                    lessonCount++;
+                    keyboardRows.push([{
+                        text: `✏️ ${lesson.lesson} (${dayLabel} ${lesson.start_time} - هفته ${weekLabel})`,
+                        callback_data: `schedule:ai:edit_lesson:${weekType}:${day}:${index}`
+                    }]);
+                });
+            }
+        }
+    };
+
+    addLessonsToKeyboard('odd');
+    addLessonsToKeyboard('even');
+
+    if (lessonCount === 0) {
+        await this.telegram.editMessageText(chatId, messageId, "هیچ درسی برای ویرایش یافت نشد.", {
+             inline_keyboard: [[{ text: "↩️ بازگشت", callback_data: "cancel_action" }]]
+        });
+        return;
+    }
+
+    keyboardRows.push([{ text: "✅ اتمام ویرایش و مشاهده پیش‌نمایش", callback_data: "schedule:ai:show_preview" }]);
+
+    await this.telegram.editMessageText(chatId, messageId, "✏️ کدام درس را می‌خواهید ویرایش کنید؟", {
+        inline_keyboard: keyboardRows
+    });
+  }
+
+  private async handleScheduleAIEditLesson(chatId: number, messageId: number, data: string, user: any): Promise<void> {
+    const userState = await this.state.getState(user.id);
+    if (userState?.name !== 'awaiting_ai_confirmation' || !userState.data?.schedule) {
+        await this.telegram.editMessageText(chatId, messageId, "⚠️ این عملیات منقضی شده است. لطفاً دوباره تلاش کنید.");
+        return;
+    }
+
+    const parts = data.split(':');
+    const weekType = parts[3];
+    const day = parts[4];
+    const lessonIndex = parseInt(parts[5], 10);
+
+    await this.state.setState(user.id, {
+        name: 'awaiting_ai_lesson_edit',
+        data: {
+            schedule: userState.data.schedule,
+            editTarget: { weekType, day, lessonIndex }
+        },
+        expireAt: Date.now() + 10 * 60 * 1000 // 10 minutes
+    });
+
+    const lesson = (userState.data.schedule as any)[`${weekType}_week_schedule`][day][lessonIndex];
+
+    const message = `✏️ در حال ویرایش:\n*${lesson.lesson}*\n\n` +
+                    `لطفاً اطلاعات جدید را با فرمت زیر ارسال کنید:\n` +
+                    `\`نام درس - ساعت شروع - ساعت پایان - محل برگزاری\``;
+
+    await this.telegram.editMessageText(chatId, messageId, message, {
+        inline_keyboard: [[{ text: "❌ لغو ویرایش", callback_data: "schedule:ai:edit" }]]
+    });
+  }
+
+  private async handleShowAIPreview(chatId: number, messageId: number, user: any): Promise<void> {
+    const userState = await this.state.getState(user.id);
+    if (userState?.name !== 'awaiting_ai_confirmation' || !userState.data?.schedule) {
+        await this.telegram.editMessageText(chatId, messageId, "⚠️ این عملیات منقضی شده یا داده‌ای برای نمایش وجود ندارد. لطفاً دوباره تلاش کنید.");
+        return;
+    }
+
+    const previewText = formatSchedulePreview(userState.data.schedule);
+    const replyMarkup: InlineKeyboardMarkup = {
+        inline_keyboard: [
+            [{ text: "✅ تایید و ذخیره", callback_data: "schedule:ai:confirm" }],
+            [{ text: "✏️ ویرایش", callback_data: "schedule:ai:edit" }],
+            [{ text: "❌ لغو", callback_data: "cancel_action" }]
+        ]
+    };
+
+    await this.telegram.editMessageText(chatId, messageId, previewText, replyMarkup);
   }
 
   private async handleAbsenceCallback(chatId: number, messageId: number, data: string, user: any): Promise<void> {

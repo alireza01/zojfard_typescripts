@@ -658,4 +658,49 @@ export class DatabaseService {
             return false;
         }
     }
+
+    /**
+     * Gets all active API keys for a given service.
+     */
+    async getApiKeys(service = 'gemini'): Promise<string[]> {
+        try {
+            const { data, error } = await this.supabase
+                .from('api_keys')
+                .select('api_key')
+                .eq('service', service)
+                .eq('is_active', true);
+
+            if (error) throw error;
+
+            return data ? data.map(item => item.api_key) : [];
+        } catch (e) {
+            console.error(`[Data] Error fetching API keys for service ${service}: ${e}`);
+            return [];
+        }
+    }
+
+    /**
+     * Saves the full schedule for a user, overwriting existing data.
+     */
+    async saveFullSchedule(userId: number, schedule: UserSchedule): Promise<void> {
+        try {
+            const updatePayload = {
+                user_id: userId,
+                odd_week_schedule: schedule.odd_week_schedule,
+                even_week_schedule: schedule.even_week_schedule,
+                updated_at: new Date().toISOString(),
+            };
+
+            const { error } = await this.supabase
+                .from("user_schedules")
+                .upsert(updatePayload, { onConflict: "user_id" });
+
+            if (error) throw error;
+
+            console.log(`[Schedule] Full schedule saved for user ${userId}`);
+        } catch (e) {
+            console.error(`[Schedule] Error saving full schedule for user ${userId}: ${e}`);
+            throw e;
+        }
+    }
 }
