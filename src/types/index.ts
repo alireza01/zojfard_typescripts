@@ -111,6 +111,15 @@ export interface BotUsage {
   timestamp?: string;
 }
 
+export interface UserAbsence {
+  id?: number;
+  user_id: number;
+  lesson_name: string;
+  absence_count: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
 // Keyboard Types
 export interface InlineKeyboardButton {
   text: string;
