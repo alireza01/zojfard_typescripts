@@ -748,8 +748,8 @@ export class CallbackHandler {
             await this.state.setState(user.id, userState);
             await this.handleBroadcastAskMessage(chatId, messageId, user);
         }
-    } else if (action === 'confirm_send') {
-        await this.handleBroadcastConfirmSend(chatId, messageId, user);
+    } else if (action === 'final_confirm') {
+        await this.handleBroadcastFinalConfirm(chatId, messageId, user);
     } else if (action === 'delete_last') {
         await this.handleBroadcastDeleteLast(chatId, messageId, user);
     } else if (action === 'delete_multiple') {
@@ -763,9 +763,9 @@ export class CallbackHandler {
     // other broadcast actions will go here
   }
 
-  private async handleBroadcastConfirmSend(chatId: number, messageId: number, user: any): Promise<void> {
+  private async handleBroadcastFinalConfirm(chatId: number, messageId: number, user: any): Promise<void> {
     const userState = await this.state.getState(user.id);
-    if (!userState || userState.name !== 'broadcast_flow' || !userState.data.message) {
+    if (!userState || userState.name !== 'broadcast_flow' || !userState.data.message || !userState.data.targetUsers || !userState.data.targetGroups) {
         await this.telegram.editMessageText(chatId, messageId, "⚠️ اطلاعات ارسال منقضی شده یا نامعتبر است. لطفاً دوباره تلاش کنید.", {
             inline_keyboard: [[{ text: "شروع مجدد", callback_data: "admin:broadcast" }]]
         });
@@ -775,59 +775,31 @@ export class CallbackHandler {
     // Acknowledge the confirmation
     await this.telegram.editMessageText(chatId, messageId, "✅ تایید شد. در حال آماده سازی برای ارسال...");
 
-    const { method, audience, recipients, message } = userState.data;
+    const { method, message, targetUsers, targetGroups } = userState.data;
     const startTime = Date.now();
     let successCount = 0;
     let failCount = 0;
     let sentCount = 0;
-
-    let targetUsers: { user_id: number; chat_id: number; }[] = [];
-    let targetGroups: { group_id: number; }[] = [];
-
-    if (audience === 'users' || audience === 'both') {
-        const users = await this.database.getAllUsers();
-        targetUsers.push(...users.map(u => ({ user_id: u.user_id, chat_id: u.chat_id })));
-    }
-    if (audience === 'groups' || audience === 'both') {
-        const groups = await this.database.getAllGroups();
-        targetGroups.push(...groups.map(g => ({ group_id: g.group_id })));
-    }
-    if (audience === 'specific' && recipients) {
-        for (const r of recipients) {
-            if (!r.startsWith('@')) {
-                const id = parseInt(r);
-                if (!isNaN(id)) {
-                    if (id > 0) {
-                        targetUsers.push({ user_id: id, chat_id: id });
-                    } else {
-                        targetGroups.push({ group_id: id });
-                    }
-                }
-            }
-        }
-    }
-
-    targetUsers = [...new Map(targetUsers.map(item => [item.chat_id, item])).values()];
-    targetGroups = [...new Map(targetGroups.map(item => [item.group_id, item])).values()];
+    const failedSends: string[] = [];
 
     const totalTargets = targetUsers.length + targetGroups.length;
+    const statusMessageResult = await this.telegram.sendMessage(chatId, `🚀 Starting broadcast to ${totalTargets} recipients...`);
+    const statusMessageId = statusMessageResult.ok ? statusMessageResult.result.message_id : 0;
 
-    const statusMessage = await this.telegram.sendMessage(chatId, `🚀 شروع ارسال به ${totalTargets} گیرنده... (0/${totalTargets})`);
     const broadcastId = await this.database.createBroadcast(message.message_id, chatId);
 
-    const sendPromises = [];
-
     const updateStatusMessage = async () => {
-        if (statusMessage.ok && statusMessage.result) {
+        if (statusMessageId) {
             await this.telegram.editMessageText(
                 chatId,
-                statusMessage.result.message_id,
-                `🚀 در حال ارسال... (${sentCount}/${totalTargets})`
+                statusMessageId,
+                `🚀 Sending... (${successCount + failCount}/${totalTargets} complete)`
             );
         }
     };
 
-    const processTarget = async (targetId: number, isUser: boolean) => {
+    const processTarget = async (target: { chat_id?: number; group_id?: number; full_name?: string; group_name?: string; username?: string; user_id?: number }, isUser: boolean) => {
+        const targetId = isUser ? target.chat_id! : target.group_id!;
         let sentMessage;
         try {
             if (method === 'forward') {
@@ -856,34 +828,43 @@ export class CallbackHandler {
             }
         } catch (e) {
             failCount++;
+            const targetName = isUser ? `${target.full_name} (${target.username ? '@' + target.username : 'ID: ' + target.user_id})` : `${target.group_name} (ID: ${target.group_id})`;
+            failedSends.push(targetName);
             await this.database.logBroadcastMessage(broadcastId, isUser ? targetId : null, !isUser ? targetId : null, -1, 'failed');
-        }
-        sentCount++;
-        if (sentCount % 10 === 0) {
-            await updateStatusMessage();
         }
     };
 
     for (const target of targetUsers) {
-        sendPromises.push(processTarget(target.chat_id, true));
+        await processTarget(target, true);
         await new Promise(r => setTimeout(r, 50));
-    }
-    for (const target of targetGroups) {
-        sendPromises.push(processTarget(target.group_id, false));
-        await new Promise(r => setTimeout(r, 50));
+        sentCount++;
+        if (sentCount % 10 === 0) {
+            await updateStatusMessage();
+        }
     }
 
-    await Promise.all(sendPromises);
+    for (const target of targetGroups) {
+        await processTarget(target, false);
+        await new Promise(r => setTimeout(r, 50));
+        sentCount++;
+        if (sentCount % 10 === 0) {
+            await updateStatusMessage();
+        }
+    }
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-    const report = `📊 *گزارش ارسال همگانی*\n\n` +
+    let report = `📊 *گزارش ارسال همگانی*\n\n` +
                    `✅ موفق: ${successCount}\n` +
                    `❌ ناموفق: ${failCount}\n` +
                    `👥 کل گیرندگان: ${totalTargets}\n` +
                    `⏱️ مدت زمان: ${duration} ثانیه`;
 
-    if (statusMessage.ok && statusMessage.result) {
-        await this.telegram.editMessageText(chatId, statusMessage.result.message_id, report, { parse_mode: 'Markdown' });
+    if (failedSends.length > 0) {
+        report += `\n\n*لیست موارد ناموفق:*\n` + failedSends.join('\n');
+    }
+
+    if (statusMessageId) {
+        await this.telegram.editMessageText(chatId, statusMessageId, report, { parse_mode: 'Markdown' });
     } else {
         await this.telegram.sendMessage(chatId, report, { parse_mode: 'Markdown' });
     }
@@ -939,12 +920,17 @@ export class CallbackHandler {
     for (const msg of messagesToDelete) {
         const targetChatId = msg.user_id || msg.group_id;
         if (targetChatId) {
-            const { ok } = await this.telegram.deleteMessage(targetChatId, msg.message_id);
-            if (ok) {
-                successCount++;
-            } else {
+            try {
+                const { ok } = await this.telegram.deleteMessage(targetChatId, msg.message_id);
+                if (ok) {
+                    successCount++;
+                } else {
+                    failCount++;
+                }
+            } catch (error) {
                 failCount++;
             }
+            await new Promise(r => setTimeout(r, 50));
         }
     }
 
@@ -1045,12 +1031,17 @@ export class CallbackHandler {
         for (const msg of messagesToDelete) {
             const targetChatId = msg.user_id || msg.group_id;
             if (targetChatId) {
-                const { ok } = await this.telegram.deleteMessage(targetChatId, msg.message_id);
-                if (ok) {
-                    successCount++;
-                } else {
+                try {
+                    const { ok } = await this.telegram.deleteMessage(targetChatId, msg.message_id);
+                    if (ok) {
+                        successCount++;
+                    } else {
+                        failCount++;
+                    }
+                } catch (error) {
                     failCount++;
                 }
+                await new Promise(r => setTimeout(r, 50));
             }
         }
         await this.database.deleteBroadcast(broadcastId);
