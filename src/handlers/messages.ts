@@ -61,28 +61,34 @@ export class MessageHandler {
   private async handleStateBasedMessage(message: TelegramMessage, userState: UserState): Promise<void> {
     const user = message.from!;
     const chat = message.chat;
-    const text = message.text!;
 
     try {
+      let stateShouldBeCleared = true;
+
       if (userState.name === "awaiting_lesson_details") {
-        await this.handleLessonDetailsInput(message, userState.data);
+        const success = await this.handleLessonDetailsInput(message, userState.data);
+        if (!success) {
+          stateShouldBeCleared = false; // Don't clear state if format was invalid, let user retry
+        }
       } else if (userState.name === "awaiting_teleport_date") {
         await this.handleTeleportDateInput(message);
       }
       
-      // Clear state after handling
-      await this.state.deleteState(user.id);
+      if (stateShouldBeCleared) {
+        await this.state.deleteState(user.id);
+      }
     } catch (error) {
       console.error('Error handling state-based message:', error);
       await this.telegram.sendMessage(chat.id, BOT_MESSAGES.ERROR_OCCURRED);
-      await this.state.deleteState(user.id);
+      await this.state.deleteState(user.id); // Clear state on unexpected error
     }
   }
 
   /**
-   * Handles lesson details input when user is adding a new lesson
+   * Handles lesson details input when user is adding a new lesson.
+   * Returns true on success, false on validation failure.
    */
-  private async handleLessonDetailsInput(message: TelegramMessage, stateData: any): Promise<void> {
+  private async handleLessonDetailsInput(message: TelegramMessage, stateData: any): Promise<boolean> {
     const user = message.from!;
     const chat = message.chat;
     const text = message.text!;
@@ -90,7 +96,7 @@ export class MessageHandler {
 
     if (!this.isClassAdditionFormat(text)) {
       await this.telegram.sendMessage(chat.id, BOT_MESSAGES.INVALID_FORMAT);
-      return;
+      return false;
     }
 
     const parts = text.split('-').map(part => part.trim());
@@ -99,7 +105,7 @@ export class MessageHandler {
     // Validate time format
     if (!isValidTimeFormat(startTime) || !isValidTimeFormat(endTime)) {
       await this.telegram.sendMessage(chat.id, BOT_MESSAGES.INVALID_TIME);
-      return;
+      return false;
     }
 
     // Parse start and end times to compare
@@ -108,7 +114,7 @@ export class MessageHandler {
 
     if (startMinutes >= endMinutes) {
       await this.telegram.sendMessage(chat.id, BOT_MESSAGES.INVALID_TIME_ORDER);
-      return;
+      return false;
     }
 
     const lesson: ScheduleLesson = {
@@ -121,9 +127,11 @@ export class MessageHandler {
     try {
       await this.database.saveUserSchedule(user.id, weekType, day, lesson);
       await this.telegram.sendMessage(chat.id, BOT_MESSAGES.CLASS_ADDED);
+      return true;
     } catch (error) {
       console.error('Error saving lesson:', error);
       await this.telegram.sendMessage(chat.id, BOT_MESSAGES.ERROR_OCCURRED);
+      return true; // Still clear state on unexpected DB error
     }
   }
 

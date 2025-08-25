@@ -72,16 +72,22 @@ export class CallbackHandler {
         await this.handleScheduleDeleteMain(chatId, messageId, user);
       }
       else if (data.startsWith("schedule:delete:confirm_week:")) {
-        await this.handleScheduleDeleteMain(chatId, messageId, user);
+        await this.handleScheduleDeleteConfirmWeek(chatId, messageId, data, user);
       }
       else if (data.startsWith("schedule:delete:select_week:")) {
-        await this.handleScheduleSetSelectWeek(chatId, messageId);
+        await this.handleScheduleDeleteSelectWeek(chatId, messageId, data);
       }
       else if (data.startsWith("schedule:delete:select_day:")) {
-        await this.handleScheduleSetSelectDay(chatId, messageId, data);
+        await this.handleScheduleDeleteSelectDay(chatId, messageId, data);
       }
-      else if (data.startsWith("schedule:delete:lesson:")) {
-        await this.handleScheduleDeleteMain(chatId, messageId, user);
+      else if (data.startsWith("schedule:delete:show_day:")) {
+        await this.handleScheduleDeleteShowDay(chatId, messageId, data, user);
+      }
+      else if (data.startsWith("schedule:delete:confirm_day:")) {
+        await this.handleScheduleDeleteDay(chatId, messageId, data, user);
+      }
+      else if (data.startsWith("schedule:delete:confirm_lesson:")) {
+        await this.handleScheduleDeleteLesson(chatId, messageId, data, user);
       }
       
       // PDF callback
@@ -412,7 +418,9 @@ export class CallbackHandler {
     const hasEvenSchedule = Object.keys(userSchedule.even_week_schedule).length > 0;
 
     if (!hasOddSchedule && !hasEvenSchedule) {
-      await this.telegram.editMessageText(chatId, messageId, BOT_MESSAGES.NO_SCHEDULE);
+      await this.telegram.editMessageText(chatId, messageId, BOT_MESSAGES.NO_SCHEDULE, {
+        inline_keyboard: [[{ text: "↩️ بازگشت", callback_data: "menu:schedule" }]]
+      });
       return;
     }
 
@@ -421,12 +429,12 @@ export class CallbackHandler {
     const replyMarkup: InlineKeyboardMarkup = {
       inline_keyboard: [
         [
-          { text: "🟣 حذف کل هفته فرد", callback_data: "schedule:delete:confirm_week:odd" },
-          { text: "🟢 حذف کل هفته زوج", callback_data: "schedule:delete:confirm_week:even" }
+          { text: "🗑️ حذف کل برنامه هفته فرد", callback_data: "schedule:delete:confirm_week:odd:prompt" },
+          { text: "🗑️ حذف کل برنامه هفته زوج", callback_data: "schedule:delete:confirm_week:even:prompt" }
         ],
         [
-          { text: "🗑️ حذف دروس یک روز خاص", callback_data: "schedule:delete:select_week:day" },
-          { text: "❌ حذف یک درس خاص", callback_data: "schedule:delete:select_week:lesson" }
+          { text: "❌ حذف تمام دروس یک روز", callback_data: "schedule:delete:select_week:day" },
+          { text: "🚫 حذف یک درس خاص", callback_data: "schedule:delete:select_week:lesson" }
         ],
         [
           { text: "↩️ بازگشت (منو برنامه)", callback_data: "menu:schedule" }
@@ -435,6 +443,106 @@ export class CallbackHandler {
     };
 
     await this.telegram.editMessageText(chatId, messageId, message, replyMarkup);
+  }
+
+  private async handleScheduleDeleteSelectWeek(chatId: number, messageId: number, data: string): Promise<void> {
+    const deleteType = data.split(':')[3]; // 'day' or 'lesson'
+    const message = "لطفاً هفته‌ای که می‌خواهید از آن حذف کنید را انتخاب نمایید:";
+
+    const replyMarkup: InlineKeyboardMarkup = {
+      inline_keyboard: [
+        [
+          { text: "هفته فرد 🟣", callback_data: `schedule:delete:select_day:odd:${deleteType}` },
+          { text: "هفته زوج 🟢", callback_data: `schedule:delete:select_day:even:${deleteType}` }
+        ],
+        [
+          { text: "↩️ بازگشت (منو حذف)", callback_data: "schedule:delete:main" }
+        ]
+      ]
+    };
+
+    await this.telegram.editMessageText(chatId, messageId, message, replyMarkup);
+  }
+
+  private async handleScheduleDeleteSelectDay(chatId: number, messageId: number, data: string): Promise<void> {
+    const parts = data.split(':');
+    const weekType = parts[3];
+    const deleteType = parts[4];
+    const weekLabel = weekType === 'odd' ? 'فرد' : 'زوج';
+
+    const message = `کدام روز از *هفته ${weekLabel}* را برای حذف انتخاب می‌کنید؟`;
+
+    const dayButtons = ENGLISH_WEEKDAYS.map((dayKey, index) => ({
+      text: PERSIAN_WEEKDAYS[index],
+      callback_data: `schedule:delete:show_day:${weekType}:${dayKey}:${deleteType}`
+    }));
+
+    const rows = [];
+    for (let i = 0; i < dayButtons.length; i += 2) {
+      rows.push(i + 1 < dayButtons.length ? [dayButtons[i], dayButtons[i+1]] : [dayButtons[i]]);
+    }
+
+    const replyMarkup: InlineKeyboardMarkup = {
+      inline_keyboard: [
+        ...rows,
+        [{ text: "↩️ بازگشت (انتخاب هفته)", callback_data: `schedule:delete:select_week:${deleteType}` }]
+      ]
+    };
+
+    await this.telegram.editMessageText(chatId, messageId, message, replyMarkup);
+  }
+
+  private async handleScheduleDeleteShowDay(chatId: number, messageId: number, data: string, user: any): Promise<void> {
+    const parts = data.split(':');
+    const weekType = parts[3];
+    const day = parts[4];
+    const deleteType = parts[5];
+
+    const weekLabel = weekType === 'odd' ? 'فرد' : 'زوج';
+    const dayIndex = ENGLISH_WEEKDAYS.indexOf(day);
+    const dayLabel = PERSIAN_WEEKDAYS[dayIndex];
+
+    const userSchedule = await this.database.getUserSchedule(user.id);
+    const schedule = weekType === 'odd' ? userSchedule.odd_week_schedule : userSchedule.even_week_schedule;
+    const dayLessons = schedule[day] || [];
+
+    if (dayLessons.length === 0) {
+      await this.telegram.editMessageText(
+        chatId,
+        messageId,
+        `هیچ درسی برای روز *${dayLabel}* هفته *${weekLabel}* ثبت نشده است.`,
+        { inline_keyboard: [[{ text: "↩️ بازگشت", callback_data: `schedule:delete:select_day:${weekType}:${deleteType}` }]] }
+      );
+      return;
+    }
+
+    if (deleteType === 'day') {
+      const message = `آیا از حذف تمام دروس روز *${dayLabel}* هفته *${weekLabel}* اطمینان دارید؟`;
+      const replyMarkup: InlineKeyboardMarkup = {
+        inline_keyboard: [
+          [{ text: `✅ بله، حذف کن`, callback_data: `schedule:delete:confirm_day:${weekType}:${day}` }],
+          [{ text: "❌ خیر، بازگشت", callback_data: `schedule:delete:select_day:${weekType}:${deleteType}` }]
+        ]
+      };
+      await this.telegram.editMessageText(chatId, messageId, message, replyMarkup);
+    } else { // deleteType === 'lesson'
+      let message = `کدام درس از روز *${dayLabel}* هفته *${weekLabel}* را می‌خواهید حذف کنید؟\n\n`;
+      const lessonButtons = dayLessons.map((lesson, index) => {
+        const lessonIdentifier = `${lesson.lesson.replace(/\s/g, '_')}_${lesson.start_time}`;
+        return [{
+          text: `❌ ${lesson.lesson} (${lesson.start_time})`,
+          callback_data: `schedule:delete:confirm_lesson:${weekType}:${day}:${index}`
+        }];
+      });
+
+      const replyMarkup: InlineKeyboardMarkup = {
+        inline_keyboard: [
+          ...lessonButtons,
+          [{ text: "↩️ بازگشت", callback_data: `schedule:delete:select_day:${weekType}:${deleteType}` }]
+        ]
+      };
+      await this.telegram.editMessageText(chatId, messageId, message, replyMarkup);
+    }
   }
 
   private async handlePdfExport(chatId: number, messageId: number, user: any): Promise<void> {
@@ -461,7 +569,7 @@ export class CallbackHandler {
         BOT_MESSAGES.PDF_GENERATED(fullName),
         {
           inline_keyboard: [
-            [{ text: "↩️ بازگشت به منوی برنامه", callback_data: "menu:schedule" }]
+            [{ text: "↩️ بازگشت به منوی اصلی", callback_data: "menu:help" }]
           ]
         }
       );
@@ -631,23 +739,43 @@ export class CallbackHandler {
    * Handles schedule deletion confirmation
    */
   private async handleScheduleDeleteConfirmWeek(chatId: number, messageId: number, data: string, user: any): Promise<void> {
-    const weekType = data.split(':')[3] as 'odd' | 'even';
+    const parts = data.split(':');
+    const weekType = parts[3] as 'odd' | 'even';
+    const action = parts[4];
     const weekLabel = weekType === 'odd' ? 'فرد' : 'زوج';
+
+    if (action === 'prompt') {
+      const message = `⚠️ *اخطار!*\n\nآیا از حذف *تمام* برنامه هفته *${weekLabel}* اطمینان دارید؟ این عمل غیرقابل بازگشت است.`;
+      const replyMarkup: InlineKeyboardMarkup = {
+        inline_keyboard: [
+          [
+            { text: `✅ بله، کل هفته ${weekLabel} حذف شود`, callback_data: `schedule:delete:confirm_week:${weekType}:confirm` }
+          ],
+          [
+            { text: `❌ خیر، بازگشت`, callback_data: `schedule:delete:main` }
+          ]
+        ]
+      };
+      await this.telegram.editMessageText(chatId, messageId, message, replyMarkup);
+      return;
+    }
     
     try {
       await this.database.deleteEntireWeekSchedule(user.id, weekType);
       
-      const successMessage = `✅ تمام برنامه هفته ${weekLabel} با موفقیت حذف شد.`;
+      const successMessage = `✅ تمام برنامه هفته *${weekLabel}* با موفقیت حذف شد.`;
       const replyMarkup: InlineKeyboardMarkup = {
         inline_keyboard: [
-          [{ text: "↩️ بازگشت به منوی برنامه", callback_data: "menu:schedule" }]
+          [{ text: "↩️ بازگشت به منوی حذف", callback_data: "schedule:delete:main" }]
         ]
       };
       
       await this.telegram.editMessageText(chatId, messageId, successMessage, replyMarkup);
     } catch (error) {
       console.error('Error deleting week schedule:', error);
-      await this.telegram.editMessageText(chatId, messageId, BOT_MESSAGES.ERROR_OCCURRED);
+      await this.telegram.editMessageText(chatId, messageId, BOT_MESSAGES.ERROR_OCCURRED, {
+         inline_keyboard: [[{ text: "↩️ بازگشت", callback_data: "schedule:delete:main" }]]
+      });
     }
   }
 
@@ -666,20 +794,54 @@ export class CallbackHandler {
       const success = await this.database.deleteUserScheduleDay(user.id, weekType, day);
       
       if (success) {
-        const successMessage = `✅ تمام دروس روز ${dayLabel} از هفته ${weekLabel} حذف شد.`;
+        const successMessage = `✅ تمام دروس روز *${dayLabel}* از هفته *${weekLabel}* حذف شد.`;
         const replyMarkup: InlineKeyboardMarkup = {
           inline_keyboard: [
             [{ text: "↩️ بازگشت به منوی حذف", callback_data: "schedule:delete:main" }]
           ]
         };
-        
         await this.telegram.editMessageText(chatId, messageId, successMessage, replyMarkup);
       } else {
-        await this.telegram.editMessageText(chatId, messageId, "❌ هیچ درسی برای حذف یافت نشد.");
+        await this.telegram.editMessageText(chatId, messageId, "❌ هیچ درسی برای حذف در این روز یافت نشد.", {
+          inline_keyboard: [[{ text: "↩️ بازگشت", callback_data: `schedule:delete:select_day:${weekType}:day` }]]
+        });
       }
     } catch (error) {
       console.error('Error deleting day schedule:', error);
-      await this.telegram.editMessageText(chatId, messageId, BOT_MESSAGES.ERROR_OCCURRED);
+      await this.telegram.editMessageText(chatId, messageId, BOT_MESSAGES.ERROR_OCCURRED, {
+         inline_keyboard: [[{ text: "↩️ بازگشت", callback_data: "schedule:delete:main" }]]
+      });
+    }
+  }
+
+  /**
+   * Handles deletion of a single lesson
+   */
+  private async handleScheduleDeleteLesson(chatId: number, messageId: number, data: string, user: any): Promise<void> {
+    const parts = data.split(':');
+    const weekType = parts[3] as 'odd' | 'even';
+    const day = parts[4];
+    const lessonIndex = parseInt(parts[5], 10);
+
+    try {
+      const success = await this.database.deleteUserScheduleLesson(user.id, weekType, day, lessonIndex);
+
+      if (success) {
+        const successMessage = `✅ درس مورد نظر با موفقیت حذف شد.`;
+        // Refresh the lesson list view
+        await this.handleScheduleDeleteShowDay(chatId, messageId, `schedule:delete:show_day:${weekType}:${day}:lesson`, user);
+        await this.telegram.answerCallbackQuery(data, successMessage);
+
+      } else {
+        await this.telegram.editMessageText(chatId, messageId, "❌ درس مورد نظر برای حذف یافت نشد. ممکن است قبلا حذف شده باشد.", {
+          inline_keyboard: [[{ text: "↩️ بازگشت", callback_data: `schedule:delete:show_day:${weekType}:${day}:lesson` }]]
+        });
+      }
+    } catch (error) {
+      console.error('Error deleting lesson:', error);
+      await this.telegram.editMessageText(chatId, messageId, BOT_MESSAGES.ERROR_OCCURRED, {
+         inline_keyboard: [[{ text: "↩️ بازگشت", callback_data: "schedule:delete:main" }]]
+      });
     }
   }
 }
