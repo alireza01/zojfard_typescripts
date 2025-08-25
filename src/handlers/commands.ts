@@ -5,7 +5,8 @@ import { PDFService } from '../services/pdf';
 import { StateService } from '../services/state';
 import { BOT_MESSAGES, PERSIAN_WEEKDAYS, PERSIAN_WEEKDAYS_FULL, ENGLISH_WEEKDAYS, REFERENCE_PERSIAN_DAY, REFERENCE_PERSIAN_MONTH, REFERENCE_PERSIAN_YEAR, REFERENCE_STATUS } from '../config/constants';
 import { getPersianDate, getWeekStatus, parsePersianDate, jalaliToGregorian, getPersianMonthName } from '../utils/persian';
-import { parseTime } from '../utils/time';
+import { parseTime, formatDuration } from '../utils/time';
+import { ScheduleLesson } from '../types';
 
 export class CommandHandler {
   constructor(
@@ -261,23 +262,41 @@ export class CommandHandler {
         const todayDayKey = ENGLISH_WEEKDAYS[todayIndex];
         const todayPersianDay = PERSIAN_WEEKDAYS_FULL[todayIndex];
         
-        const todaySchedule = currentWeekStatus === "زوج"
+        const todayScheduleRaw = currentWeekStatus === "زوج"
           ? (schedule.even_week_schedule[todayDayKey] || [])
           : (schedule.odd_week_schedule[todayDayKey] || []);
 
+        const todaySchedule = this.generateTodayScheduleWithGaps(todayScheduleRaw);
+
         if (todayIndex < 5 && todaySchedule.length > 0) {
           weekMessage += `📅 *برنامه امروز (${todayPersianDay}):*\n\n`;
-          todaySchedule.forEach((lesson, idx) => {
-            const startMins = parseTime(lesson.start_time);
-            let classNum = "";
-            if (startMins && startMins >= 8*60 && startMins < 10*60) classNum = "(کلاس اول) ";
-            else if (startMins && startMins >= 10*60 && startMins < 12*60) classNum = "(کلاس دوم) ";
-            else if (startMins && startMins >= 13*60 && startMins < 15*60) classNum = "(کلاس سوم) ";
-            else if (startMins && startMins >= 15*60 && startMins < 17*60) classNum = "(کلاس چهارم) ";
-            else if (startMins && startMins >= 17*60 && startMins < 19*60) classNum = "(کلاس پنجم) ";
-            
-            weekMessage += `${idx + 1}. ${classNum}*${lesson.lesson}*\n`;
-            weekMessage += `   ⏰ ${lesson.start_time}-${lesson.end_time} | 📍 ${lesson.location || '-'}\n`;
+          const now = new Date();
+          const nowInMinutes = now.getHours() * 60 + now.getMinutes();
+          let lessonCounter = 1;
+
+          todaySchedule.forEach((item) => {
+            const endTime = parseTime(item.end_time);
+            const isDone = endTime !== null && nowInMinutes > (endTime - 30);
+            const doneMark = isDone ? '✅ ' : '';
+
+            // @ts-ignore
+            if (item.is_idle) {
+              weekMessage += `${doneMark}*${item.lesson}*\n`;
+              weekMessage += `   ⏰ ${item.start_time} - ${item.end_time} | ${item.location}\n`;
+            } else {
+              const lesson = item as ScheduleLesson;
+              const startMins = parseTime(lesson.start_time);
+              let classNum = "";
+              if (startMins && startMins >= 8*60 && startMins < 10*60) classNum = "(کلاس اول) ";
+              else if (startMins && startMins >= 10*60 && startMins < 12*60) classNum = "(کلاس دوم) ";
+              else if (startMins && startMins >= 13*60 && startMins < 15*60) classNum = "(کلاس سوم) ";
+              else if (startMins && startMins >= 15*60 && startMins < 17*60) classNum = "(کلاس چهارم) ";
+              else if (startMins && startMins >= 17*60 && startMins < 19*60) classNum = "(کلاس پنجم) ";
+
+              weekMessage += `${doneMark}${lessonCounter}. ${classNum}*${lesson.lesson}*\n`;
+              weekMessage += `   ⏰ ${lesson.start_time}-${lesson.end_time} | 📍 ${lesson.location || '-'}\n`;
+              lessonCounter++;
+            }
           });
         } else if (todayIndex < 5) {
           weekMessage += BOT_MESSAGES.NO_SCHEDULE_TODAY(todayPersianDay, currentWeekStatus);
@@ -620,16 +639,26 @@ export class CommandHandler {
         if (persianDayIndex < 5) { // Weekday
           const englishDay = ENGLISH_WEEKDAYS[persianDayIndex];
           const persianDay = PERSIAN_WEEKDAYS[persianDayIndex];
-          const dayLessons = schedule[englishDay] || [];
+          const dayLessonsRaw = schedule[englishDay] || [];
+          const dayLessons = this.generateTodayScheduleWithGaps(dayLessonsRaw);
           
           teleportMessage += `📚 برنامه آن روز (${persianDay}):\n\n`;
           
           if (dayLessons.length === 0) {
             teleportMessage += `🎉 در آن روز کلاسی ندارید!`;
           } else {
-            dayLessons.forEach((lesson, idx) => {
-              teleportMessage += `${idx + 1}. *${lesson.lesson}*\n`;
-              teleportMessage += `   ⏰ ${lesson.start_time}-${lesson.end_time} | 📍 ${lesson.location || '-'}\n`;
+            let lessonCounter = 1;
+            dayLessons.forEach((item) => {
+              // @ts-ignore
+              if (item.is_idle) {
+                teleportMessage += `*${item.lesson}*\n`;
+                teleportMessage += `   ⏰ ${item.start_time} - ${item.end_time} | ${item.location}\n`;
+              } else {
+                const lesson = item as ScheduleLesson;
+                teleportMessage += `${lessonCounter}. *${lesson.lesson}*\n`;
+                teleportMessage += `   ⏰ ${lesson.start_time}-${lesson.end_time} | 📍 ${lesson.location || '-'}\n`;
+                lessonCounter++;
+              }
             });
           }
         } else {
@@ -735,5 +764,41 @@ export class CommandHandler {
     targetDate.setUTCDate(targetDate.getUTCDate() - daysToSubtract);
     targetDate.setUTCHours(0, 0, 0, 0);
     return targetDate;
+  }
+
+  /**
+   * Generates a new schedule array including idle time ("بیکاری")
+   */
+  private generateTodayScheduleWithGaps(todaySchedule: ScheduleLesson[]): (ScheduleLesson | { lesson: string; start_time: string; end_time: string; location: string; is_idle: boolean })[] {
+    if (todaySchedule.length === 0) {
+      return [];
+    }
+
+    const enhancedSchedule: (ScheduleLesson | { lesson: string; start_time: string; end_time: string; location: string; is_idle: boolean })[] = [];
+
+    for (let i = 0; i < todaySchedule.length; i++) {
+      const currentLesson = todaySchedule[i];
+      enhancedSchedule.push(currentLesson);
+
+      const nextLesson = todaySchedule[i + 1];
+      if (nextLesson) {
+        const currentEnd = parseTime(currentLesson.end_time);
+        const nextStart = parseTime(nextLesson.start_time);
+
+        if (currentEnd !== null && nextStart !== null && nextStart > currentEnd) {
+          const idleMinutes = nextStart - currentEnd;
+          if (idleMinutes > 0) {
+            enhancedSchedule.push({
+              lesson: "بیکاری",
+              start_time: currentLesson.end_time,
+              end_time: nextLesson.start_time,
+              location: `☕️ ${formatDuration(idleMinutes)}`,
+              is_idle: true
+            });
+          }
+        }
+      }
+    }
+    return enhancedSchedule;
   }
 }
