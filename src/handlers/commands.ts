@@ -480,6 +480,7 @@ export class CommandHandler {
       inline_keyboard: [
         [
           { text: "📊 آمار ربات", callback_data: "admin:stats" },
+          { text: "📢 ارسال پیام همگانی", callback_data: "admin:broadcast" }
         ],
         [
           { text: "↩️ بازگشت به منوی اصلی", callback_data: "menu:help" },

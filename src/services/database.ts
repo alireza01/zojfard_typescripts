@@ -1,4 +1,22 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+/*
+CREATE TABLE broadcasts (
+    id SERIAL PRIMARY KEY,
+    message_id INTEGER NOT NULL,
+    chat_id BIGINT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE broadcast_messages (
+    id SERIAL PRIMARY KEY,
+    broadcast_id INTEGER REFERENCES broadcasts(id) ON DELETE CASCADE,
+    user_id BIGINT,
+    group_id BIGINT,
+    message_id INTEGER NOT NULL,
+    sent_at TIMESTAMPTZ DEFAULT NOW(),
+    status VARCHAR(20) DEFAULT 'sent'
+);
+*/
 import type {
     DatabaseUser,
     DatabaseGroup,
@@ -520,6 +538,124 @@ export class DatabaseService {
                 broadcastCount: 0,
                 topCommands: []
             };
+        }
+    }
+
+    /**
+     * Creates a new broadcast record and returns its ID.
+     */
+    async createBroadcast(messageId: number, chatId: number): Promise<number> {
+        try {
+            const { data, error } = await this.supabase
+                .from('broadcasts')
+                .insert({
+                    message_id: messageId,
+                    chat_id: chatId,
+                })
+                .select('id')
+                .single();
+
+            if (error) throw error;
+            return data.id;
+        } catch (e) {
+            console.error(`[Data] Error creating broadcast: ${e}`);
+            throw e;
+        }
+    }
+
+    /**
+     * Logs a message sent as part of a broadcast.
+     */
+    async logBroadcastMessage(broadcastId: number, userId: number | null, groupId: number | null, messageId: number, status: string): Promise<void> {
+        try {
+            const { error } = await this.supabase
+                .from('broadcast_messages')
+                .insert({
+                    broadcast_id: broadcastId,
+                    user_id: userId,
+                    group_id: groupId,
+                    message_id: messageId,
+                    status: status,
+                });
+
+            if (error) throw error;
+        } catch (e) {
+            console.error(`[Data] Error logging broadcast message: ${e}`);
+        }
+    }
+
+    /**
+     * Gets the last broadcast.
+     */
+    async getLastBroadcast(): Promise<{ id: number; message_id: number; chat_id: number; } | null> {
+        try {
+            const { data, error } = await this.supabase
+                .from('broadcasts')
+                .select('*')
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .single();
+
+            if (error) throw error;
+            return data;
+        } catch (e) {
+            console.error(`[Data] Error getting last broadcast: ${e}`);
+            return null;
+        }
+    }
+
+    /**
+     * Gets a list of recent broadcasts.
+     */
+    async getBroadcasts(limit = 5): Promise<{ id: number; message_id: number; created_at: string; }[]> {
+        try {
+            const { data, error } = await this.supabase
+                .from('broadcasts')
+                .select('id, message_id, created_at')
+                .order('created_at', { ascending: false })
+                .limit(limit);
+
+            if (error) throw error;
+            return data || [];
+        } catch (e) {
+            console.error(`[Data] Error getting broadcasts: ${e}`);
+            return [];
+        }
+    }
+
+    /**
+     * Gets all messages for a given broadcast.
+     */
+    async getBroadcastMessages(broadcastId: number): Promise<{ id: number; user_id: number | null; group_id: number | null; message_id: number; }[]> {
+        try {
+            const { data, error } = await this.supabase
+                .from('broadcast_messages')
+                .select('id, user_id, group_id, message_id')
+                .eq('broadcast_id', broadcastId);
+
+            if (error) throw error;
+            return data || [];
+        } catch (e) {
+            console.error(`[Data] Error getting broadcast messages: ${e}`);
+            return [];
+        }
+    }
+
+    /**
+     * Deletes a broadcast and all its associated messages.
+     */
+    async deleteBroadcast(broadcastId: number): Promise<boolean> {
+        try {
+            const { error } = await this.supabase
+                .from('broadcasts')
+                .delete()
+                .eq('id', broadcastId);
+
+            if (error) throw error;
+            return true;
+        } catch (e) {
+            console.error(`[Data] Error deleting broadcast: ${e}`);
+            return false;
         }
     }
 }

@@ -115,14 +115,24 @@ export class TelegramService {
    */
   async sendDocument(
     chatId: string | number, 
-    documentBuffer: ArrayBuffer, 
+    document: ArrayBuffer | string,
     filename: string, 
     caption?: string, 
     replyMarkup?: InlineKeyboardMarkup
   ): Promise<TelegramApiResponse> {
+    if (typeof document === 'string') {
+        const payload: Record<string, any> = {
+            chat_id: String(chatId),
+            document: document,
+        };
+        if (caption) payload.caption = caption;
+        if (replyMarkup) payload.reply_markup = replyMarkup;
+        return await this.apiCall("sendDocument", payload);
+    }
+
     const form = new FormData();
     form.append("chat_id", String(chatId));
-    form.append("document", new Blob([documentBuffer], { type: "application/pdf" }), filename);
+    form.append("document", new Blob([document], { type: "application/pdf" }), filename);
     
     if (caption) form.append("caption", caption);
     if (replyMarkup) form.append("reply_markup", JSON.stringify(replyMarkup));
@@ -167,10 +177,58 @@ export class TelegramService {
     return await this.apiCall<TelegramMessage>("forwardMessage", payload);
   }
 
+  async sendPhoto(chatId: string | number, photo: string, caption?: string): Promise<TelegramApiResponse<TelegramMessage>> {
+    const payload = {
+      chat_id: String(chatId),
+      photo: photo,
+      caption: caption,
+    };
+    return await this.apiCall<TelegramMessage>("sendPhoto", payload);
+  }
+
+  async sendVideo(chatId: string | number, video: string, caption?: string): Promise<TelegramApiResponse<TelegramMessage>> {
+    const payload = {
+      chat_id: String(chatId),
+      video: video,
+      caption: caption,
+    };
+    return await this.apiCall<TelegramMessage>("sendVideo", payload);
+  }
+
+  async sendAudio(chatId: string | number, audio: string, caption?: string): Promise<TelegramApiResponse<TelegramMessage>> {
+    const payload = {
+      chat_id: String(chatId),
+      audio: audio,
+      caption: caption,
+    };
+    return await this.apiCall<TelegramMessage>("sendAudio", payload);
+  }
+
+  async sendVoice(chatId: string | number, voice: string, caption?: string): Promise<TelegramApiResponse<TelegramMessage>> {
+    const payload = {
+      chat_id: String(chatId),
+      voice: voice,
+      caption: caption,
+    };
+    return await this.apiCall<TelegramMessage>("sendVoice", payload);
+  }
+
   /**
    * Gets bot information
    */
   async getBotInfo(): Promise<TelegramApiResponse<BotInfo>> {
     return await this.apiCall<BotInfo>("getMe");
+  }
+
+  /**
+   * Deletes a message
+   */
+  async deleteMessage(chatId: string | number, messageId: number): Promise<TelegramApiResponse> {
+    const payload = {
+      chat_id: String(chatId),
+      message_id: messageId,
+    };
+
+    return await this.apiCall("deleteMessage", payload);
   }
 }
