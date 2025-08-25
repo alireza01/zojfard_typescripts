@@ -8,7 +8,8 @@ import type {
     TelegramUser,
     TelegramChat,
     DaySchedule,
-    BotStats
+    BotStats,
+    UserAbsence
 } from '../types';
 import { ENGLISH_WEEKDAYS } from '../config/constants';
 import { parseTime } from '../utils/time';
@@ -240,6 +241,70 @@ export class DatabaseService {
         } catch (e) {
             console.error(`[Schedule] Error deleting lesson for user ${userId}: ${e}`);
             throw e;
+        }
+    }
+
+    /**
+     * Gets all absences for a user
+     */
+    async getAbsences(userId: number): Promise<UserAbsence[]> {
+        try {
+            const { data, error } = await this.supabase
+                .from("user_absences")
+                .select("*")
+                .eq("user_id", userId);
+
+            if (error) throw error;
+            return data || [];
+        } catch (e) {
+            console.error(`[Absence] Error fetching absences for user ${userId}: ${e}`);
+            return [];
+        }
+    }
+
+    /**
+     * Upserts a user's absence count for a specific lesson and returns the new count.
+     * This relies on a PostgreSQL function `upsert_absence` to be created in the database.
+     */
+    async upsertAbsence(userId: number, lessonName: string, change: number): Promise<number> {
+        try {
+            const { data, error } = await this.supabase.rpc('upsert_absence', {
+                p_user_id: userId,
+                p_lesson_name: lessonName,
+                p_change: change,
+            });
+
+            if (error) {
+                console.error(`[Absence] RPC error for upsert_absence for user ${userId}, lesson ${lessonName}:`, error);
+                throw error;
+            }
+
+            console.log(`[Absence] Upserted absence for user ${userId}, lesson '${lessonName}', change ${change}. New count: ${data}`);
+            return data as number;
+        } catch (e) {
+            console.error(`[Absence] Exception in upsertAbsence for user ${userId}, lesson ${lessonName}: ${e}`);
+            throw e;
+        }
+    }
+
+    /**
+     * Deletes the absence record for a specific lesson for a user.
+     */
+    async deleteAbsence(userId: number, lessonName: string): Promise<boolean> {
+        try {
+            const { error } = await this.supabase
+                .from("user_absences")
+                .delete()
+                .eq("user_id", userId)
+                .eq("lesson_name", lessonName);
+
+            if (error) throw error;
+
+            console.log(`[Absence] Deleted absence record for user ${userId}, lesson '${lessonName}'`);
+            return true;
+        } catch (e) {
+            console.error(`[Absence] Error deleting absence for user ${userId}, lesson ${lessonName}: ${e}`);
+            return false;
         }
     }
 

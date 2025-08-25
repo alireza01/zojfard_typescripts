@@ -89,6 +89,11 @@ export class CallbackHandler {
       else if (data.startsWith("schedule:delete:confirm_lesson:")) {
         await this.handleScheduleDeleteLesson(chatId, messageId, data, user);
       }
+
+      // Absence callbacks
+      else if (data.startsWith("absence:")) {
+        await this.handleAbsenceCallback(chatId, messageId, data, user);
+      }
       
       // PDF callback
       else if (data === "pdf:export") {
@@ -843,5 +848,259 @@ export class CallbackHandler {
          inline_keyboard: [[{ text: "↩️ بازگشت", callback_data: "schedule:delete:main" }]]
       });
     }
+  }
+
+  // =================================================================
+  // Absence Management Callbacks
+  // =================================================================
+
+  private async getUniqueLessonNames(userId: number): Promise<string[]> {
+    const userSchedule = await this.database.getUserSchedule(userId);
+    const lessonSet = new Set<string>();
+
+    const processSchedule = (schedule: any) => {
+        if (!schedule) return;
+        Object.values(schedule).forEach((day: any) => {
+            if (Array.isArray(day)) {
+                day.forEach((lesson: any) => lessonSet.add(lesson.lesson));
+            }
+        });
+    };
+
+    processSchedule(userSchedule.odd_week_schedule);
+    processSchedule(userSchedule.even_week_schedule);
+
+    return Array.from(lessonSet).sort();
+  }
+
+  private async handleAbsenceCallback(chatId: number, messageId: number, data: string, user: any): Promise<void> {
+      const parts = data.split(':');
+      const action = parts[1];
+      const lessonName = parts.length > 2 ? parts.slice(2).join(':') : undefined;
+
+      const fakeMessage = { from: user, chat: { id: chatId }, message_id: messageId, date: Date.now() / 1000 };
+
+      switch (action) {
+          case 'menu':
+              await this.commandHandler.handleAbsences(fakeMessage, true);
+              break;
+          case 'add_menu':
+              await this.handleAbsenceAddMenu(chatId, messageId);
+              break;
+          case 'list_all':
+              await this.handleAbsenceListAll(chatId, messageId, user.id);
+              break;
+          case 'edit':
+              if (lessonName) {
+                  await this.handleAbsenceEdit(chatId, messageId, user.id, lessonName);
+              }
+              break;
+          case 'increment':
+              if (lessonName) {
+                  await this.handleAbsenceIncrement(chatId, messageId, user.id, lessonName);
+              }
+              break;
+          case 'decrement':
+              if (lessonName) {
+                  await this.handleAbsenceDecrement(chatId, messageId, user.id, lessonName);
+              }
+              break;
+          case 'clear':
+              if (lessonName) {
+                  await this.handleAbsenceClear(chatId, messageId, user.id, lessonName);
+              }
+              break;
+          case 'add_by_day_picker':
+              await this.handleAbsenceAddByDayPicker(chatId, messageId);
+              break;
+          case 'add_for_day':
+              const day = parts[2];
+              if (day) {
+                  await this.handleAbsenceAddForDay(chatId, messageId, user, day);
+              }
+              break;
+          case 'add_by_course_picker':
+              await this.handleAbsenceAddByCoursePicker(chatId, messageId, user.id);
+              break;
+      }
+  }
+
+  private async handleAbsenceAddMenu(chatId: number, messageId: number): Promise<void> {
+    const text = "➕ *ثبت غیبت*\n\nچگونه می‌خواهید غیبت را ثبت کنید؟";
+    const replyMarkup: InlineKeyboardMarkup = {
+        inline_keyboard: [
+            [
+                { text: "🗓 بر اساس روز هفته", callback_data: "absence:add_by_day_picker" },
+                { text: "📚 بر اساس درس خاص", callback_data: "absence:add_by_course_picker" },
+            ],
+            [
+                { text: "↩️ بازگشت", callback_data: "absence:menu" }
+            ]
+        ]
+    };
+    await this.telegram.editMessageText(chatId, messageId, text, replyMarkup);
+  }
+
+  private async handleAbsenceAddByDayPicker(chatId: number, messageId: number): Promise<void> {
+      const text = "🗓 *ثبت غیبت بر اساس روز*\n\nلطفا روز مورد نظر را انتخاب کنید. با انتخاب هر روز، برای تمام کلاس‌های آن روز یک غیبت ثبت می‌شود.";
+
+      const dayButtons = PERSIAN_WEEKDAYS.slice(0, 5).map((day, index) => ({
+          text: day,
+          callback_data: `absence:add_for_day:${ENGLISH_WEEKDAYS[index]}`
+      }));
+
+      const rows = [];
+      for (let i = 0; i < dayButtons.length; i += 2) {
+          if (i + 1 < dayButtons.length) {
+              rows.push([dayButtons[i], dayButtons[i+1]]);
+          } else {
+              rows.push([dayButtons[i]]);
+          }
+      }
+
+      const replyMarkup: InlineKeyboardMarkup = {
+          inline_keyboard: [
+              ...rows,
+              [
+                  { text: "↩️ بازگشت", callback_data: "absence:add_menu" }
+              ]
+          ]
+      };
+      await this.telegram.editMessageText(chatId, messageId, text, replyMarkup);
+  }
+
+  private async handleAbsenceAddByCoursePicker(chatId: number, messageId: number, userId: number): Promise<void> {
+      const text = "📚 *ثبت غیبت بر اساس درس*\n\nلطفا درسی که می‌خواهید برای آن غیبت ثبت کنید را انتخاب نمایید.";
+      const lessons = await this.getUniqueLessonNames(userId);
+
+      if (lessons.length === 0) {
+          await this.telegram.editMessageText(chatId, messageId, "شما هنوز هیچ درسی در برنامه خود ثبت نکرده‌اید. ابتدا از منوی اصلی برنامه خود را تنظیم کنید.", {
+              inline_keyboard: [[{ text: "↩️ بازگشت", callback_data: "absence:add_menu" }]]
+          });
+          return;
+      }
+
+      const lessonButtons = lessons.map(lesson => ([{
+          text: lesson,
+          callback_data: `absence:edit:${lesson}`
+      }]));
+
+      const replyMarkup: InlineKeyboardMarkup = {
+          inline_keyboard: [
+              ...lessonButtons,
+              [
+                  { text: "↩️ بازگشت", callback_data: "absence:add_menu" }
+              ]
+          ]
+      };
+      await this.telegram.editMessageText(chatId, messageId, text, replyMarkup);
+  }
+
+  private async handleAbsenceListAll(chatId: number, messageId: number, userId: number): Promise<void> {
+    const text = "👁️ *مشاهده و ویرایش غیبت‌ها*\n\nدر لیست زیر، دروسی که برای آن‌ها غیبت ثبت کرده‌اید به همراه تعداد غیبت‌ها نمایش داده شده است. با کلیک بر روی هر درس می‌توانید آن را ویرایش کنید.";
+    const allLessons = await this.getUniqueLessonNames(userId);
+    const absences = await this.database.getAbsences(userId);
+    const absenceMap = new Map(absences.map(a => [a.lesson_name, a.absence_count]));
+
+    if (allLessons.length === 0) {
+        await this.telegram.editMessageText(chatId, messageId, "شما هنوز هیچ درسی در برنامه خود ثبت نکرده‌اید.", {
+            inline_keyboard: [[{ text: "↩️ بازگشت", callback_data: "absence:menu" }]]
+        });
+        return;
+    }
+
+    const lessonButtons = allLessons.map(lesson => {
+        const count = absenceMap.get(lesson) || 0;
+        return [{ text: `${lesson} (${count} غیبت)`, callback_data: `absence:edit:${lesson}` }];
+    });
+
+    const replyMarkup: InlineKeyboardMarkup = {
+        inline_keyboard: [
+            ...lessonButtons,
+            [
+                { text: "↩️ بازگشت", callback_data: "absence:menu" }
+            ]
+        ]
+    };
+    await this.telegram.editMessageText(chatId, messageId, text, replyMarkup);
+  }
+
+  private async handleAbsenceEdit(chatId: number, messageId: number, userId: number, lessonName: string): Promise<void> {
+      const absences = await this.database.getAbsences(userId);
+      const absence = absences.find(a => a.lesson_name === lessonName);
+      const count = absence ? absence.absence_count : 0;
+
+      const text = `✏️ *ویرایش غیبت‌های درس: ${lessonName}*\n\nتعداد غیبت‌های ثبت شده: *${count}*`;
+
+      const replyMarkup: InlineKeyboardMarkup = {
+          inline_keyboard: [
+              [
+                  { text: "➕", callback_data: `absence:increment:${lessonName}` },
+                  { text: "➖", callback_data: `absence:decrement:${lessonName}` },
+              ],
+              [
+                  { text: "🗑️ پاک کردن تمام غیبت‌ها", callback_data: `absence:clear:${lessonName}` }
+              ],
+              [
+                  { text: "↩️ بازگشت به لیست", callback_data: "absence:list_all" }
+              ]
+          ]
+      };
+      await this.telegram.editMessageText(chatId, messageId, text, replyMarkup);
+  }
+
+  private async handleAbsenceIncrement(chatId: number, messageId: number, userId: number, lessonName: string): Promise<void> {
+      const newCount = await this.database.upsertAbsence(userId, lessonName, 1);
+      await this.handleAbsenceEdit(chatId, messageId, userId, lessonName);
+
+      if (newCount === 2) {
+          await this.telegram.sendMessage(chatId, BOT_MESSAGES.ABSENCE_WARNING(lessonName));
+      } else if (newCount === 3) {
+          await this.telegram.sendMessage(chatId, BOT_MESSAGES.ABSENCE_DANGER(lessonName));
+      }
+  }
+
+  private async handleAbsenceDecrement(chatId: number, messageId: number, userId: number, lessonName: string): Promise<void> {
+      await this.database.upsertAbsence(userId, lessonName, -1);
+      await this.handleAbsenceEdit(chatId, messageId, userId, lessonName);
+  }
+
+  private async handleAbsenceClear(chatId: number, messageId: number, userId: number, lessonName: string): Promise<void> {
+      await this.database.deleteAbsence(userId, lessonName);
+      await this.handleAbsenceEdit(chatId, messageId, userId, lessonName);
+  }
+
+  private async handleAbsenceAddForDay(chatId: number, messageId: number, user: any, day: string): Promise<void> {
+      const userSchedule = await this.database.getUserSchedule(user.id);
+      const dayLessons = new Set<string>();
+
+      const oddDaySchedule = userSchedule.odd_week_schedule[day] || [];
+      const evenDaySchedule = userSchedule.even_week_schedule[day] || [];
+
+      oddDaySchedule.forEach(l => dayLessons.add(l.lesson));
+      evenDaySchedule.forEach(l => dayLessons.add(l.lesson));
+
+      if (dayLessons.size === 0) {
+          await this.telegram.editMessageText(chatId, messageId, "در این روز هیچ کلاسی برای ثبت غیبت وجود ندارد.", {
+              inline_keyboard: [[{ text: "↩️ بازگشت", callback_data: "absence:add_by_day_picker" }]]
+          });
+          return;
+      }
+
+      let reportMessage = "✅ *غیبت‌های روزانه ثبت شد*\n\n";
+      for (const lessonName of dayLessons) {
+          const newCount = await this.database.upsertAbsence(user.id, lessonName, 1);
+          reportMessage += `- *${lessonName}*: ${newCount} غیبت\n`;
+
+          if (newCount === 2) {
+              await this.telegram.sendMessage(chatId, BOT_MESSAGES.ABSENCE_WARNING(lessonName));
+          } else if (newCount === 3) {
+              await this.telegram.sendMessage(chatId, BOT_MESSAGES.ABSENCE_DANGER(lessonName));
+          }
+      }
+
+      await this.telegram.editMessageText(chatId, messageId, reportMessage, {
+          inline_keyboard: [[{ text: "↩️ بازگشت به منوی غیبت", callback_data: "absence:menu" }]]
+      });
   }
 }

@@ -43,6 +43,9 @@ export class CommandHandler {
               { text: "⚙️ تنظیم/ویرایش برنامه", callback_data: "menu:schedule" },
             ],
             [
+              { text: "🚷 مدیریت غیبت‌ها", callback_data: "absence:menu" }
+            ],
+            [
               { text: "📤 دریافت PDF برنامه", callback_data: "pdf:export" },
               { text: "ℹ️ راهنما", callback_data: "menu:help" }
             ]
@@ -108,6 +111,59 @@ export class CommandHandler {
     } catch (error) {
       console.error(`[Command:/help] Error for chat ${chat.id}: ${error}`);
       const errorMsg = "⚠️ خطا در نمایش راهنما.";
+      if (fromCallback && 'message_id' in message) {
+        await this.telegram.editMessageText(chat.id, message.message_id, errorMsg);
+      } else {
+        await this.telegram.sendMessage(chat.id, errorMsg, undefined, message.message_id);
+      }
+    }
+  }
+
+  /**
+   * Handles /absences command
+   */
+  async handleAbsences(message: TelegramMessage, fromCallback = false): Promise<void> {
+    const user = message.from;
+    const chat = message.chat;
+
+    if (!user) return;
+
+    await this.database.logUsage(user, chat, fromCallback ? "callback: absence:menu" : "/absences");
+
+    try {
+      if (chat.type !== "private") {
+        const botInfo = await this.telegram.getBotInfo();
+        const botUsername = botInfo.result?.username || "this_bot";
+        await this.telegram.sendMessage(
+          chat.id,
+          BOT_MESSAGES.PRIVATE_ONLY(botUsername),
+          undefined,
+          message.message_id
+        );
+        return;
+      }
+
+      await this.database.addUser(user, chat);
+
+      const absenceMessage = "🚷 *مدیریت غیبت‌ها*\n\nاز این بخش می‌توانید غیبت‌های خود را مدیریت کنید.";
+      const replyMarkup: InlineKeyboardMarkup = {
+        inline_keyboard: [
+          [
+            { text: "➕ ثبت غیبت", callback_data: "absence:add_menu" },
+            { text: "👁️ مشاهده و ویرایش غیبت‌ها", callback_data: "absence:list_all" },
+          ],
+          [{ text: "↩️ بازگشت به منوی اصلی", callback_data: "menu:help" }],
+        ],
+      };
+
+      if (fromCallback && 'message_id' in message) {
+        await this.telegram.editMessageText(chat.id, message.message_id, absenceMessage, replyMarkup);
+      } else {
+        await this.telegram.sendMessage(chat.id, absenceMessage, replyMarkup, message.message_id);
+      }
+    } catch (error) {
+      console.error(`[Command:/absences] Error for chat ${chat.id}: ${error}`);
+      const errorMsg = "⚠️ خطا در پردازش دستور /absences.";
       if (fromCallback && 'message_id' in message) {
         await this.telegram.editMessageText(chat.id, message.message_id, errorMsg);
       } else {

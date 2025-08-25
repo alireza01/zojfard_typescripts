@@ -85,6 +85,9 @@ export class TelegramBot {
             case '/schedule':
               await this.commandHandler.handleSchedule(message);
               break;
+            case '/absences':
+              await this.commandHandler.handleAbsences(message);
+              break;
             case '/status':
               await this.commandHandler.handleStatus(message);
               break;
