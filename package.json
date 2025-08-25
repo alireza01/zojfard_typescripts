@@ -10,6 +10,7 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
+    "@google/genai": "^0.11.3",
     "@supabase/supabase-js": "^2.39.0",
     "luxon": "^3.4.4",
     "jspdf": "^2.5.1",

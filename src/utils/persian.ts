@@ -255,3 +255,41 @@ export function reshapePersianText(text: string): string {
   
   return processedWords.join(' ');
 }
+
+/**
+ * Formats the parsed schedule into a user-friendly preview message.
+ */
+import { ParsedSchedule, DaySchedule } from '../types';
+import { BOT_MESSAGES, ENGLISH_WEEKDAYS, PERSIAN_WEEKDAYS } from '../config/constants';
+
+export function formatSchedulePreview(schedule: ParsedSchedule, header: string = BOT_MESSAGES.AI_PREVIEW_HEADER): string {
+    let message = header + "\n\n";
+
+    const formatWeek = (weekLabel: string, weekSchedule: DaySchedule): string => {
+        let weekText = `🔸 *هفته ${weekLabel}:*\n`;
+        let hasAnyClass = false;
+
+        for (const dayKey of ENGLISH_WEEKDAYS) {
+            const dayLessons = weekSchedule[dayKey] || [];
+            if (dayLessons.length > 0) {
+                hasAnyClass = true;
+                const persianDay = PERSIAN_WEEKDAYS[ENGLISH_WEEKDAYS.indexOf(dayKey)];
+                weekText += `  📅 ${persianDay}:\n`;
+                dayLessons.forEach((lesson, index) => {
+                    weekText += `    ${index + 1}. ${lesson.lesson}\n`;
+                    weekText += `       ⏰ ${lesson.start_time}-${lesson.end_time} | 📍 ${lesson.location}\n`;
+                });
+            }
+        }
+
+        if (!hasAnyClass) {
+            weekText += `  _هیچ کلاسی برای این هفته یافت نشد._\n`;
+        }
+        return weekText + '\n';
+    };
+
+    message += formatWeek('فرد', schedule.odd_week_schedule);
+    message += formatWeek('زوج', schedule.even_week_schedule);
+
+    return message;
+  }

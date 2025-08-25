@@ -389,7 +389,10 @@ export class CommandHandler {
       const replyMarkup: InlineKeyboardMarkup = {
         inline_keyboard: [
           [
-            { text: "⚙️ تنظیم / افزودن درس", callback_data: "schedule:set:select_week" },
+            { text: "✨ افزودن با هوش مصنوعی (بتا)", callback_data: "schedule:ai:start" },
+          ],
+          [
+            { text: "⚙️ تنظیم / افزودن دستی", callback_data: "schedule:set:select_week" },
             { text: "🗑️ حذف درس / روز / هفته", callback_data: "schedule:delete:main" },
           ],
           [

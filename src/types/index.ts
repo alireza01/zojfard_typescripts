@@ -70,6 +70,9 @@ export interface UserSchedule {
   even_week_schedule: DaySchedule;
 }
 
+// AI Service Types
+export type ParsedSchedule = UserSchedule;
+
 // Persian Date Types
 export interface PersianDate {
   year: number;

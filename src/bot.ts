@@ -3,6 +3,7 @@ import { TelegramService } from './services/telegram';
 import { DatabaseService } from './services/database';
 import { PDFService } from './services/pdf';
 import { StateService } from './services/state';
+import { AIService } from './services/ai'; // Import AI Service
 import { CommandHandler } from './handlers/commands';
 import { CallbackHandler } from './handlers/callbacks';
 import { MessageHandler } from './handlers/messages';
@@ -13,6 +14,7 @@ export class TelegramBot {
   private database: DatabaseService;
   private pdf: PDFService;
   private state: StateService;
+  private ai: AIService; // Add AI Service instance
   private commandHandler: CommandHandler;
   private callbackHandler: CallbackHandler;
   private messageHandler: MessageHandler;
@@ -22,6 +24,7 @@ export class TelegramBot {
     this.database = new DatabaseService(config.SUPABASE_URL, config.SUPABASE_KEY);
     this.pdf = new PDFService();
     this.state = new StateService();
+    this.ai = new AIService(this.database); // Initialize AI Service
     
     this.commandHandler = new CommandHandler(
       this.telegram, 
@@ -36,15 +39,18 @@ export class TelegramBot {
       this.database, 
       this.pdf, 
       this.state,
+      this.ai, // Pass AI service
       config.ADMIN_CHAT_ID
     );
     
     this.messageHandler = new MessageHandler(
-      this.telegram, 
-      this.database, 
+      this.telegram,
+      this.database,
       this.state,
+      this.ai, // Pass AI service
       config.ADMIN_CHAT_ID
     );
+    this.messageHandler.setCallbackHandler(this.callbackHandler);
   }
 
   /**

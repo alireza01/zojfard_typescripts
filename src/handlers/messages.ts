@@ -1,18 +1,28 @@
-import type { TelegramMessage, ScheduleLesson, UserState } from '../types';
+import type { TelegramMessage, ScheduleLesson, UserState, ParsedSchedule, DaySchedule, InlineKeyboardMarkup } from '../types';
 import { TelegramService } from '../services/telegram';
 import { DatabaseService } from '../services/database';
 import { StateService } from '../services/state';
-import { BOT_MESSAGES } from '../config/constants';
+import { AIService } from '../services/ai';
+import { BOT_MESSAGES, PERSIAN_WEEKDAYS, ENGLISH_WEEKDAYS } from '../config/constants';
 import { isValidTimeFormat } from '../utils/time';
-import { parsePersianDate, jalaliToGregorian, getPersianMonthName } from '../utils/persian';
+import { parsePersianDate, jalaliToGregorian, getPersianMonthName, formatSchedulePreview } from '../utils/persian';
+import { CallbackHandler } from './callbacks';
 
 export class MessageHandler {
+  private messageBuffers = new Map<number, { text: string, timer: NodeJS.Timeout, thinkingMessageId?: number }>();
+  private callbackHandler!: CallbackHandler;
+
   constructor(
     private telegram: TelegramService,
     private database: DatabaseService,
     private state: StateService,
+    private ai: AIService,
     private adminChatId: string
   ) {}
+
+  setCallbackHandler(handler: CallbackHandler) {
+    this.callbackHandler = handler;
+  }
 
   /**
    * Handles text messages - Complete implementation matching original JS
@@ -72,6 +82,12 @@ export class MessageHandler {
         }
       } else if (userState.name === "awaiting_teleport_date") {
         await this.handleTeleportDateInput(message);
+      } else if (userState.name === "awaiting_schedule_text") {
+        await this.handleAIScheduleInput(message);
+        stateShouldBeCleared = false; // The AI flow manages its own state
+      } else if (userState.name === "awaiting_ai_lesson_edit") {
+        await this.handleAILessonEditInput(message, userState);
+        stateShouldBeCleared = false; // The AI edit flow manages its own state
       } else if (userState.name === "broadcast_flow") {
         await this.handleBroadcastFlowMessage(message, userState);
         stateShouldBeCleared = false; // The broadcast flow manages its own state
@@ -386,5 +402,140 @@ export class MessageHandler {
         case 'specific': return `${recipients?.length || 0} گیرنده خاص`;
         default: return 'ناشناخته';
     }
+  }
+
+  /**
+   * Handles the multi-message input for the AI schedule parser.
+   */
+  private async handleAIScheduleInput(message: TelegramMessage): Promise<void> {
+    const userId = message.from!.id;
+    const chatId = message.chat.id;
+    const buffer = this.messageBuffers.get(userId);
+
+    if (buffer?.timer) {
+      clearTimeout(buffer.timer);
+    }
+
+    const newText = buffer ? `${buffer.text}\n\n${message.text}` : message.text!;
+
+    // If this is the first message in the sequence, send a "Thinking..." message.
+    let thinkingMessageId = buffer?.thinkingMessageId;
+    if (!buffer) {
+        const thinkingMessage = await this.telegram.sendMessage(chatId, BOT_MESSAGES.AI_THINKING);
+        if (thinkingMessage.ok && thinkingMessage.result) {
+            thinkingMessageId = thinkingMessage.result.message_id;
+        }
+    }
+
+    const timer = setTimeout(() => {
+      this.processAIConversation(userId, chatId, thinkingMessageId);
+      this.messageBuffers.delete(userId);
+    }, 3000); // Wait 3 seconds for more messages
+
+    this.messageBuffers.set(userId, { text: newText, timer, thinkingMessageId });
+  }
+
+  /**
+   * Processes the collected text, calls the AI, and shows the preview.
+   */
+  private async processAIConversation(userId: number, chatId: number, thinkingMessageId?: number): Promise<void> {
+    const buffer = this.messageBuffers.get(userId);
+    if (!buffer) return;
+
+    const fullText = buffer.text;
+    await this.state.deleteState(userId);
+
+    try {
+      if (thinkingMessageId) {
+          await this.telegram.editMessageText(chatId, thinkingMessageId, BOT_MESSAGES.AI_PROCESSING);
+      } else {
+          // Fallback in case the thinking message failed to send
+          await this.telegram.sendMessage(chatId, BOT_MESSAGES.AI_PROCESSING);
+      }
+
+      const schedule = await this.ai.parseSchedule(fullText);
+
+      // Store the parsed schedule in a new state, awaiting confirmation
+      await this.state.setState(userId, {
+        name: "awaiting_ai_confirmation",
+        data: { schedule },
+        expireAt: Date.now() + 15 * 60 * 1000, // 15 minutes to confirm/edit
+      });
+
+      const previewText = formatSchedulePreview(schedule);
+      const replyMarkup: InlineKeyboardMarkup = {
+          inline_keyboard: [
+              [{ text: "✅ تایید و ذخیره", callback_data: "schedule:ai:confirm" }],
+              [{ text: "✏️ ویرایش", callback_data: "schedule:ai:edit" }],
+              [{ text: "❌ لغو", callback_data: "cancel_action" }]
+          ]
+      };
+
+      await this.telegram.sendMessage(chatId, previewText, replyMarkup);
+
+    } catch (error) {
+      console.error(`[AI] Error processing schedule for user ${userId}:`, error);
+      await this.telegram.sendMessage(chatId, BOT_MESSAGES.AI_ERROR);
+    } finally {
+        // Clean up the "processing" message
+        if (thinkingMessageId) {
+            await this.telegram.deleteMessage(chatId, thinkingMessageId);
+        }
+    }
+  }
+
+  private async handleAILessonEditInput(message: TelegramMessage, userState: UserState): Promise<void> {
+    const user = message.from!;
+    const text = message.text!;
+    const { schedule, editTarget } = userState.data;
+    const { weekType, day, lessonIndex } = editTarget;
+
+    if (!this.isClassAdditionFormat(text)) {
+      await this.telegram.sendMessage(message.chat.id, BOT_MESSAGES.INVALID_FORMAT);
+      // Don't clear state, let user try again
+      return;
+    }
+
+    const parts = text.split('-').map(part => part.trim());
+    const [lessonName, startTime, endTime, location] = parts;
+
+    // Additional validation
+    if (!isValidTimeFormat(startTime) || !isValidTimeFormat(endTime) || this.parseTimeToMinutes(startTime) >= this.parseTimeToMinutes(endTime)) {
+        await this.telegram.sendMessage(message.chat.id, BOT_MESSAGES.INVALID_TIME_ORDER);
+        return;
+    }
+
+    const newLesson: ScheduleLesson = {
+      lesson: lessonName,
+      start_time: startTime,
+      end_time: endTime,
+      location: location,
+    };
+
+    // Update the schedule object
+    const updatedSchedule = { ...schedule };
+    (updatedSchedule as any)[`${weekType}_week_schedule`][day][lessonIndex] = newLesson;
+
+    // Set the state back to confirmation, with the updated schedule
+    await this.state.setState(user.id, {
+      name: "awaiting_ai_confirmation",
+      data: { schedule: updatedSchedule },
+      expireAt: Date.now() + 15 * 60 * 1000,
+    });
+
+    // Use the callback handler to re-display the edit menu
+    await this.telegram.sendMessage(message.chat.id, "✅ درس با موفقیت ویرایش شد. به لیست ویرایش بازگشتید.");
+
+    // We need to simulate a callback query to re-enter the edit menu
+    const fakeCallbackQuery: any = {
+        data: 'schedule:ai:edit',
+        from: user,
+        message: {
+            message_id: message.message_id,
+            chat: message.chat,
+            date: message.date,
+        }
+    };
+    await this.callbackHandler.handleCallback(fakeCallbackQuery);
   }
 }
