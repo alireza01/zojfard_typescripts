@@ -72,6 +72,9 @@ export class MessageHandler {
         }
       } else if (userState.name === "awaiting_teleport_date") {
         await this.handleTeleportDateInput(message);
+      } else if (userState.name === "broadcast_flow") {
+        await this.handleBroadcastFlowMessage(message, userState);
+        stateShouldBeCleared = false; // The broadcast flow manages its own state
       }
       
       if (stateShouldBeCleared) {
@@ -289,83 +292,99 @@ export class MessageHandler {
   }
 
   /**
-   * Handles broadcast message from admin
-   */
-  private async handleBroadcastMessage(message: TelegramMessage): Promise<void> {
-    const user = message.from!;
-    const chat = message.chat;
-    const text = message.text!;
-    const replyTo = message.reply_to_message!;
-
-    try {
-      // Determine broadcast type based on replied message
-      let broadcastType: 'users' | 'groups' = 'users';
-      
-      if (replyTo.text?.includes('گروه')) {
-        broadcastType = 'groups';
-      }
-
-      await this.telegram.sendMessage(
-        chat.id,
-        `📤 شروع ارسال پیام به ${broadcastType === 'users' ? 'کاربران' : 'گروه‌ها'}...`
-      );
-
-      let successCount = 0;
-      let failCount = 0;
-
-      if (broadcastType === 'users') {
-        const users = await this.database.getAllUsers();
-        
-        for (const dbUser of users) {
-          if (!dbUser.chat_id) continue;
-          
-          try {
-            await this.telegram.sendMessage(dbUser.chat_id, text);
-            successCount++;
-            
-            // Add small delay to avoid rate limiting
-            await new Promise(resolve => setTimeout(resolve, 50));
-          } catch (error) {
-            console.error(`Failed to send to user ${dbUser.user_id}:`, error);
-            failCount++;
-          }
-        }
-      } else {
-        const groups = await this.database.getAllGroups();
-        
-        for (const group of groups) {
-          try {
-            await this.telegram.sendMessage(group.group_id, text);
-            successCount++;
-            
-            // Add small delay to avoid rate limiting
-            await new Promise(resolve => setTimeout(resolve, 50));
-          } catch (error) {
-            console.error(`Failed to send to group ${group.group_id}:`, error);
-            failCount++;
-          }
-        }
-      }
-
-      // Send report
-      const reportText = `📊 گزارش ارسال:\n\n` +
-                        `✅ موفق: ${successCount}\n` +
-                        `❌ ناموفق: ${failCount}\n` +
-                        `📊 کل: ${successCount + failCount}`;
-
-      await this.telegram.sendMessage(chat.id, reportText);
-
-    } catch (error) {
-      console.error('Error in handleBroadcastMessage:', error);
-      await this.telegram.sendMessage(chat.id, BOT_MESSAGES.ERROR_OCCURRED);
-    }
-  }
-
-  /**
    * Parses time string to minutes since midnight
    */
   private parseTimeToMinutes(timeStr: string): number {
     const [hours, minutes] = timeStr.split(':').map(Number);
     return hours * 60 + minutes;
+  }
+
+  private async handleBroadcastFlowMessage(message: TelegramMessage, userState: UserState): Promise<void> {
+    const user = message.from!;
+    const chat = message.chat;
+    const text = message.text;
+
+    const { audience, method } = userState.data;
+
+    if (audience === 'specific' && !userState.data.recipients) {
+        // Admin is providing the list of specific recipients
+        if (!text) {
+            await this.telegram.sendMessage(chat.id, "لطفا یک لیست معتبر از کاربران را وارد کنید.");
+            return;
+        }
+        const recipients = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+        if (recipients.length === 0) {
+            await this.telegram.sendMessage(chat.id, "لیست خالی است. لطفاً حداقل یک شناسه یا نام کاربری وارد کنید.");
+            return;
+        }
+        userState.data.recipients = recipients;
+        await this.state.setState(user.id, userState);
+        await this.telegram.sendMessage(chat.id, `✅ ${recipients.length} گیرنده ثبت شد.`);
+        // Now ask for the message to broadcast
+        const askMessage = "✉️ اکنون پیام مورد نظر برای ارسال را بفرستید.\n\n" +
+                         "می‌توانید هر نوع پیامی (متن، عکس، ویدیو، فایل و...) را ارسال کنید.";
+        await this.telegram.sendMessage(chat.id, askMessage);
+    } else {
+        // Admin is providing the message to broadcast
+        userState.data.message = message;
+        await this.state.setState(user.id, userState);
+
+        // Show preview and ask for confirmation
+        await this.showBroadcastPreview(chat.id, userState);
+    }
+  }
+
+  private async showBroadcastPreview(chatId: number, userState: UserState): Promise<void> {
+    const { method, audience, recipients, message } = userState.data;
+
+    let previewText = " предпросмотр сообщения\n\n";
+    previewText += `*ارسال:* ${method === 'forward' ? 'فوروارد از شما' : 'به عنوان پیام ربات'}\n`;
+    previewText += `*به:* ${this.getAudienceText(audience, recipients)}\n\n`;
+    previewText += "پیام شما به این صورت نمایش داده خواهد شد:\n";
+    previewText += "=====================";
+
+    await this.telegram.sendMessage(chatId, previewText, { parse_mode: 'Markdown' });
+
+    // Send the actual message content as a preview
+    if (method === 'forward') {
+        await this.telegram.forwardMessage(chatId, message.chat.id, message.message_id);
+    } else { // 'bot'
+        if (message.text) {
+            await this.telegram.sendMessage(chatId, message.text, message.reply_markup);
+        } else if (message.photo) {
+            await this.telegram.sendPhoto(chatId, message.photo[0].file_id, message.caption);
+        } else if (message.video) {
+            await this.telegram.sendVideo(chatId, message.video.file_id, message.caption);
+        } else if (message.document) {
+            await this.telegram.sendDocument(chatId, message.document.file_id, message.caption);
+        } else if (message.audio) {
+            await this.telegram.sendAudio(chatId, message.audio.file_id, message.caption);
+        } else if (message.voice) {
+            await this.telegram.sendVoice(chatId, message.voice.file_id, message.caption);
+        } else {
+            await this.telegram.sendMessage(chatId, "پیش نمایش برای این نوع پیام پشتیبانی نمی‌شود.");
+        }
+    }
+
+    const confirmationText = "آیا پیام فوق را تایید می‌کنید؟";
+    const replyMarkup: any = {
+        inline_keyboard: [
+            [
+                { text: "✅ تایید و ارسال", callback_data: "broadcast:confirm_send" },
+                { text: "❌ لغو", callback_data: "admin:broadcast" }
+            ]
+        ]
+    };
+    await this.telegram.sendMessage(chatId, confirmationText, replyMarkup);
+  }
+
+  private getAudienceText(audience: string, recipients?: string[]): string {
+    switch (audience) {
+        case 'users': return 'همه کاربران';
+        case 'groups': return 'همه گروه‌ها';
+        case 'both': return 'همه کاربران و گروه‌ها';
+        case 'specific': return `${recipients?.length || 0} گیرنده خاص`;
+        default: return 'ناشناخته';
+    }
   }
 }

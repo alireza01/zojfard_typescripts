@@ -107,18 +107,13 @@ export class CallbackHandler {
       else if (data === "admin:stats") {
         await this.handleAdminStats(chatId, messageId, user);
       }
+      else if (data === "admin:broadcast" || data.startsWith("broadcast:")) {
+        await this.handleBroadcastCallback(chatId, messageId, data, user);
+      }
       
       // Teleport callbacks
       else if (data === "teleport:ask_date") {
         await this.handleTeleportAskDate(chatId, messageId, user);
-      }
-      
-      // Broadcast callbacks
-      else if (data === "broadcast_users") {
-        await this.handleBroadcastUsers(chatId, messageId, user);
-      }
-      else if (data === "broadcast_groups") {
-        await this.handleBroadcastGroups(chatId, messageId, user);
       }
       
       // Cancel action
@@ -321,6 +316,28 @@ export class CallbackHandler {
           { text: "↩️ بازگشت (منو برنامه)", callback_data: "menu:schedule" }
         ]
       ]
+    };
+
+    await this.telegram.editMessageText(chatId, messageId, message, replyMarkup);
+  }
+
+  private async handleBroadcastAskAudience(chatId: number, messageId: number, user: any): Promise<void> {
+    const message = "👥 پیام به چه کسانی ارسال شود؟";
+
+    const replyMarkup: InlineKeyboardMarkup = {
+        inline_keyboard: [
+            [
+                { text: "👤 کاربران", callback_data: "broadcast:set_audience:users" },
+                { text: "👥 گروه‌ها", callback_data: "broadcast:set_audience:groups" },
+                { text: "👤+👥 هر دو", callback_data: "broadcast:set_audience:both" }
+            ],
+            [
+                { text: "🎯 افراد خاص", callback_data: "broadcast:set_audience:specific" }
+            ],
+            [
+                { text: "↩️ بازگشت", callback_data: "broadcast:send_new" }
+            ]
+        ]
     };
 
     await this.telegram.editMessageText(chatId, messageId, message, replyMarkup);
@@ -672,35 +689,498 @@ export class CallbackHandler {
     await this.telegram.editMessageText(chatId, messageId, message, replyMarkup);
   }
 
-  private async handleBroadcastUsers(chatId: number, messageId: number, user: any): Promise<void> {
-    if (String(chatId) !== this.adminChatId) {
-      await this.telegram.editMessageText(chatId, messageId, BOT_MESSAGES.ADMIN_ONLY);
-      return;
+  private async handleBroadcastCallback(chatId: number, messageId: number, data: string, user: any): Promise<void> {
+    const parts = data.split(':');
+    const action = parts[1];
+
+    if (data === 'admin:broadcast') {
+        await this.handleBroadcastMenu(chatId, messageId, user);
+        return;
     }
 
-    await this.telegram.editMessageText(
-      chatId,
-      messageId,
-      "📢 پیام مورد نظر برای ارسال به تمام کاربران را ارسال کنید:"
-    );
+    if (action === 'send_new') {
+        await this.handleBroadcastSendNew(chatId, messageId, user);
+    } else if (action === 'set_method') {
+        const method = parts[2]; // 'forward' or 'bot'
+        await this.state.setState(user.id, {
+            name: 'broadcast_flow',
+            data: { method: method },
+            expireAt: Date.now() + 15 * 60 * 1000 // 15 minutes to complete the flow
+        });
+        await this.handleBroadcastAskAudience(chatId, messageId, user);
+    } else if (action === 'set_audience') {
+        const audience = parts[2]; // 'users', 'groups', 'both', 'specific'
+        const userState = await this.state.getState(user.id);
+        if (!userState || userState.name !== 'broadcast_flow') {
+            // State lost or invalid, restart
+            await this.telegram.editMessageText(chatId, messageId, "⚠️ خطایی رخ داد، لطفاً از ابتدا شروع کنید.", {
+                inline_keyboard: [[{ text: "شروع مجدد", callback_data: "admin:broadcast" }]]
+            });
+            return;
+        }
+
+        userState.data.audience = audience;
+
+
+        if (audience === 'specific') {
+            await this.state.setState(user.id, userState);
+            await this.handleBroadcastAskSpecific(chatId, messageId, user);
+        } else {
+            await this.state.setState(user.id, userState);
+            await this.handleBroadcastAskMessage(chatId, messageId, user);
+        }
+    } else if (action === 'confirm_send') {
+        await this.handleBroadcastConfirmSend(chatId, messageId, user);
+    } else if (action === 'delete_last') {
+        await this.handleBroadcastDeleteLast(chatId, messageId, user);
+    } else if (action === 'delete_multiple') {
+        await this.handleBroadcastDeleteMultiple(chatId, messageId, user);
+    } else if (action === 'toggle_delete') {
+        const broadcastId = parseInt(parts[2]);
+        await this.handleBroadcastToggleDelete(chatId, messageId, user, broadcastId);
+    } else if (action === 'confirm_delete_multiple') {
+        await this.handleBroadcastConfirmDeleteMultiple(chatId, messageId, user);
+    }
+    // other broadcast actions will go here
   }
 
-  private async handleBroadcastGroups(chatId: number, messageId: number, user: any): Promise<void> {
+  private async handleBroadcastConfirmSend(chatId: number, messageId: number, user: any): Promise<void> {
+    const userState = await this.state.getState(user.id);
+    if (!userState || userState.name !== 'broadcast_flow' || !userState.data.message) {
+        await this.telegram.editMessageText(chatId, messageId, "⚠️ اطلاعات ارسال منقضی شده یا نامعتبر است. لطفاً دوباره تلاش کنید.", {
+            inline_keyboard: [[{ text: "شروع مجدد", callback_data: "admin:broadcast" }]]
+        });
+        return;
+    }
+
+    // Acknowledge the confirmation
+    await this.telegram.editMessageText(chatId, messageId, "✅ تایید شد. در حال آماده سازی برای ارسال...");
+
+    const { method, audience, recipients, message } = userState.data;
+    const startTime = Date.now();
+    let successCount = 0;
+    let failCount = 0;
+    let sentCount = 0;
+
+    let targetUsers: { user_id: number; chat_id: number; }[] = [];
+    let targetGroups: { group_id: number; }[] = [];
+
+    if (audience === 'users' || audience === 'both') {
+        const users = await this.database.getAllUsers();
+        targetUsers.push(...users.map(u => ({ user_id: u.user_id, chat_id: u.chat_id })));
+    }
+    if (audience === 'groups' || audience === 'both') {
+        const groups = await this.database.getAllGroups();
+        targetGroups.push(...groups.map(g => ({ group_id: g.group_id })));
+    }
+    if (audience === 'specific' && recipients) {
+        for (const r of recipients) {
+            if (!r.startsWith('@')) {
+                const id = parseInt(r);
+                if (!isNaN(id)) {
+                    if (id > 0) {
+                        targetUsers.push({ user_id: id, chat_id: id });
+                    } else {
+                        targetGroups.push({ group_id: id });
+                    }
+                }
+            }
+        }
+    }
+
+    targetUsers = [...new Map(targetUsers.map(item => [item.chat_id, item])).values()];
+    targetGroups = [...new Map(targetGroups.map(item => [item.group_id, item])).values()];
+
+    const totalTargets = targetUsers.length + targetGroups.length;
+
+    const statusMessage = await this.telegram.sendMessage(chatId, `🚀 شروع ارسال به ${totalTargets} گیرنده... (0/${totalTargets})`);
+    const broadcastId = await this.database.createBroadcast(message.message_id, chatId);
+
+    const sendPromises = [];
+
+    const updateStatusMessage = async () => {
+        if (statusMessage.ok && statusMessage.result) {
+            await this.telegram.editMessageText(
+                chatId,
+                statusMessage.result.message_id,
+                `🚀 در حال ارسال... (${sentCount}/${totalTargets})`
+            );
+        }
+    };
+
+    const processTarget = async (targetId: number, isUser: boolean) => {
+        let sentMessage;
+        try {
+            if (method === 'forward') {
+                sentMessage = await this.telegram.forwardMessage(targetId, message.chat.id, message.message_id);
+            } else { // 'bot'
+                if (message.text) {
+                    sentMessage = await this.telegram.sendMessage(targetId, message.text, message.reply_markup);
+                } else if (message.photo) {
+                    sentMessage = await this.telegram.sendPhoto(targetId, message.photo[0].file_id, message.caption);
+                } else if (message.video) {
+                    sentMessage = await this.telegram.sendVideo(targetId, message.video.file_id, message.caption);
+                } else if (message.document) {
+                    sentMessage = await this.telegram.sendDocument(targetId, message.document.file_id, message.document.file_name, message.caption);
+                } else if (message.audio) {
+                    sentMessage = await this.telegram.sendAudio(targetId, message.audio.file_id, message.caption);
+                } else if (message.voice) {
+                    sentMessage = await this.telegram.sendVoice(targetId, message.voice.file_id, message.caption);
+                }
+            }
+
+            if (sentMessage && sentMessage.ok) {
+                await this.database.logBroadcastMessage(broadcastId, isUser ? targetId : null, !isUser ? targetId : null, sentMessage.result.message_id, 'success');
+                successCount++;
+            } else {
+                throw new Error(sentMessage?.description || 'Failed to send message');
+            }
+        } catch (e) {
+            failCount++;
+            await this.database.logBroadcastMessage(broadcastId, isUser ? targetId : null, !isUser ? targetId : null, -1, 'failed');
+        }
+        sentCount++;
+        if (sentCount % 10 === 0) {
+            await updateStatusMessage();
+        }
+    };
+
+    for (const target of targetUsers) {
+        sendPromises.push(processTarget(target.chat_id, true));
+        await new Promise(r => setTimeout(r, 50));
+    }
+    for (const target of targetGroups) {
+        sendPromises.push(processTarget(target.group_id, false));
+        await new Promise(r => setTimeout(r, 50));
+    }
+
+    await Promise.all(sendPromises);
+
+    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+    const report = `📊 *گزارش ارسال همگانی*\n\n` +
+                   `✅ موفق: ${successCount}\n` +
+                   `❌ ناموفق: ${failCount}\n` +
+                   `👥 کل گیرندگان: ${totalTargets}\n` +
+                   `⏱️ مدت زمان: ${duration} ثانیه`;
+
+    if (statusMessage.ok && statusMessage.result) {
+        await this.telegram.editMessageText(chatId, statusMessage.result.message_id, report, { parse_mode: 'Markdown' });
+    } else {
+        await this.telegram.sendMessage(chatId, report, { parse_mode: 'Markdown' });
+    }
+
+    await this.state.deleteState(user.id);
+  }
+
+  private async handleBroadcastMenu(chatId: number, messageId: number, user: any): Promise<void> {
     if (String(chatId) !== this.adminChatId) {
       await this.telegram.editMessageText(chatId, messageId, BOT_MESSAGES.ADMIN_ONLY);
       return;
     }
 
-    await this.telegram.editMessageText(
-      chatId,
-      messageId,
-      "📢 پیام مورد نظر برای ارسال به تمام گروه‌ها را ارسال کنید:"
-    );
+    const message = "📢 *پنل ارسال پیام همگانی*\n\n" +
+                    "از این بخش می‌توانید پیام‌های خود را به کاربران و گروه‌ها ارسال کنید.";
+
+    const replyMarkup: InlineKeyboardMarkup = {
+      inline_keyboard: [
+        [
+          { text: "✉️ ارسال پیام جدید", callback_data: "broadcast:send_new" },
+        ],
+        [
+          { text: "🗑 حذف آخرین پیام", callback_data: "broadcast:delete_last" },
+          { text: "🗑🗑 حذف چند پیام اخیر", callback_data: "broadcast:delete_multiple" }
+        ],
+        [
+          { text: "↩️ بازگشت به پنل ادمین", callback_data: "admin:panel" }
+        ]
+      ]
+    };
+
+    await this.telegram.editMessageText(chatId, messageId, message, replyMarkup);
+  }
+
+  private async handleBroadcastDeleteLast(chatId: number, messageId: number, user: any): Promise<void> {
+    if (String(chatId) !== this.adminChatId) {
+        await this.telegram.editMessageText(chatId, messageId, BOT_MESSAGES.ADMIN_ONLY);
+        return;
+    }
+
+    await this.telegram.editMessageText(chatId, messageId, "🗑 در حال یافتن و حذف آخرین پیام همگانی...");
+
+    const lastBroadcast = await this.database.getLastBroadcast();
+    if (!lastBroadcast) {
+        await this.telegram.editMessageText(chatId, messageId, "❌ هیچ پیام همگانی برای حذف یافت نشد.");
+        return;
+    }
+
+    const messagesToDelete = await this.database.getBroadcastMessages(lastBroadcast.id);
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const msg of messagesToDelete) {
+        const targetChatId = msg.user_id || msg.group_id;
+        if (targetChatId) {
+            const { ok } = await this.telegram.deleteMessage(targetChatId, msg.message_id);
+            if (ok) {
+                successCount++;
+            } else {
+                failCount++;
+            }
+        }
+    }
+
+    await this.database.deleteBroadcast(lastBroadcast.id);
+
+    const report = `✅ عملیات حذف انجام شد.\n\n` +
+                   `🗑 ${successCount} پیام با موفقیت حذف شد.\n` +
+                   `⚠️ ${failCount} پیام حذف نشد (ممکن است توسط کاربر حذف شده باشد).`;
+
+    await this.telegram.editMessageText(chatId, messageId, report, {
+        inline_keyboard: [[{ text: "↩️ بازگشت", callback_data: "admin:broadcast" }]]
+    });
+  }
+
+  private async handleBroadcastDeleteMultiple(chatId: number, messageId: number, user: any): Promise<void> {
+    if (String(chatId) !== this.adminChatId) {
+        await this.telegram.editMessageText(chatId, messageId, BOT_MESSAGES.ADMIN_ONLY);
+        return;
+    }
+
+    const broadcasts = await this.database.getBroadcasts(5); // Get last 5 broadcasts
+    if (broadcasts.length === 0) {
+        await this.telegram.editMessageText(chatId, messageId, "❌ هیچ پیام همگانی برای حذف یافت نشد.");
+        return;
+    }
+
+    const message = "🗑 کدام پیام‌ها را می‌خواهید حذف کنید؟\n\n" +
+                    "لطفاً پیام‌های مورد نظر را انتخاب کرده و سپس دکمه تایید را بزنید.";
+
+    const keyboard = broadcasts.map(b => ([{
+        text: `پیام از ${new Date(b.created_at).toLocaleString('fa-IR')}`,
+        callback_data: `broadcast:toggle_delete:${b.id}`
+    }]));
+
+    keyboard.push([{ text: "✅ تایید حذف موارد انتخاب شده", callback_data: "broadcast:confirm_delete_multiple" }]);
+    keyboard.push([{ text: "↩️ بازگشت", callback_data: "admin:broadcast" }]);
+
+    const replyMarkup: any = {
+        inline_keyboard: keyboard
+    };
+
+    await this.telegram.editMessageText(chatId, messageId, message, replyMarkup);
+  }
+
+  private async handleBroadcastToggleDelete(chatId: number, messageId: number, user: any, broadcastId: number): Promise<void> {
+    const userState = await this.state.getState(user.id) || { name: 'broadcast_delete', data: { selected: [] } };
+    if (userState.name !== 'broadcast_delete') {
+        userState.name = 'broadcast_delete';
+        userState.data = { selected: [] };
+    }
+
+    const selected = userState.data.selected || [];
+    const index = selected.indexOf(broadcastId);
+    if (index > -1) {
+        selected.splice(index, 1);
+    } else {
+        selected.push(broadcastId);
+    }
+    userState.data.selected = selected;
+    await this.state.setState(user.id, userState);
+
+    // Update the keyboard to show the new selection state
+    const broadcasts = await this.database.getBroadcasts(5);
+    const keyboard = broadcasts.map(b => {
+        const isSelected = selected.includes(b.id);
+        return [{
+            text: `${isSelected ? '✅' : '🔲'} پیام از ${new Date(b.created_at).toLocaleString('fa-IR')}`,
+            callback_data: `broadcast:toggle_delete:${b.id}`
+        }];
+    });
+
+    keyboard.push([{ text: "✅ تایید حذف موارد انتخاب شده", callback_data: "broadcast:confirm_delete_multiple" }]);
+    keyboard.push([{ text: "↩️ بازگشت", callback_data: "admin:broadcast" }]);
+
+    const replyMarkup: any = {
+        inline_keyboard: keyboard
+    };
+
+    await this.telegram.editMessageText(chatId, messageId, "🗑 کدام پیام‌ها را می‌خواهید حذف کنید؟", replyMarkup);
+  }
+
+  private async handleBroadcastConfirmDeleteMultiple(chatId: number, messageId: number, user: any): Promise<void> {
+    const userState = await this.state.getState(user.id);
+    if (!userState || userState.name !== 'broadcast_delete' || !userState.data.selected || userState.data.selected.length === 0) {
+        await this.telegram.editMessageText(chatId, messageId, "❌ هیچ پیامی برای حذف انتخاب نشده است.", {
+            inline_keyboard: [[{ text: "بازگشت", callback_data: "broadcast:delete_multiple" }]]
+        });
+        return;
+    }
+
+    await this.telegram.editMessageText(chatId, messageId, `🗑 در حال حذف ${userState.data.selected.length} پیام همگانی...`);
+
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const broadcastId of userState.data.selected) {
+        const messagesToDelete = await this.database.getBroadcastMessages(broadcastId);
+        for (const msg of messagesToDelete) {
+            const targetChatId = msg.user_id || msg.group_id;
+            if (targetChatId) {
+                const { ok } = await this.telegram.deleteMessage(targetChatId, msg.message_id);
+                if (ok) {
+                    successCount++;
+                } else {
+                    failCount++;
+                }
+            }
+        }
+        await this.database.deleteBroadcast(broadcastId);
+    }
+
+    await this.state.deleteState(user.id);
+
+    const report = `✅ عملیات حذف انجام شد.\n\n` +
+                   `🗑 ${successCount} پیام با موفقیت حذف شد.\n` +
+                   `⚠️ ${failCount} پیام حذف نشد (ممکن است توسط کاربر حذف شده باشد).`;
+
+    await this.telegram.editMessageText(chatId, messageId, report, {
+        inline_keyboard: [[{ text: "↩️ بازگشت", callback_data: "admin:broadcast" }]]
+    });
+  }
+
+  private async handleBroadcastSendNew(chatId: number, messageId: number, user: any): Promise<void> {
+    if (String(chatId) !== this.adminChatId) {
+      await this.telegram.editMessageText(chatId, messageId, BOT_MESSAGES.ADMIN_ONLY);
+      return;
+    }
+
+    const message = "📢 *پنل ارسال پیام همگانی*\n\n" +
+                    "از این بخش می‌توانید پیام‌های خود را به کاربران و گروه‌ها ارسال کنید.";
+
+    const replyMarkup: InlineKeyboardMarkup = {
+      inline_keyboard: [
+        [
+          { text: "✉️ ارسال پیام جدید", callback_data: "broadcast:send_new" },
+        ],
+        [
+          { text: "🗑 حذف آخرین پیام", callback_data: "broadcast:delete_last" },
+          { text: "🗑🗑 حذف چند پیام اخیر", callback_data: "broadcast:delete_multiple" }
+        ],
+        [
+          { text: "↩️ بازگشت به پنل ادمین", callback_data: "admin:panel" }
+        ]
+      ]
+    };
+
+    await this.telegram.editMessageText(chatId, messageId, message, replyMarkup);
+  }
+
+  private async handleBroadcastDeleteLast(chatId: number, messageId: number, user: any): Promise<void> {
+    if (String(chatId) !== this.adminChatId) {
+        await this.telegram.editMessageText(chatId, messageId, BOT_MESSAGES.ADMIN_ONLY);
+        return;
+    }
+
+    await this.telegram.editMessageText(chatId, messageId, "🗑 در حال یافتن و حذف آخرین پیام همگانی...");
+
+    const lastBroadcast = await this.database.getLastBroadcast();
+    if (!lastBroadcast) {
+        await this.telegram.editMessageText(chatId, messageId, "❌ هیچ پیام همگانی برای حذف یافت نشد.");
+        return;
+    }
+
+    const messagesToDelete = await this.database.getBroadcastMessages(lastBroadcast.id);
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const msg of messagesToDelete) {
+        const targetChatId = msg.user_id || msg.group_id;
+        if (targetChatId) {
+            const { ok } = await this.telegram.deleteMessage(targetChatId, msg.message_id);
+            if (ok) {
+                successCount++;
+            } else {
+                failCount++;
+            }
+        }
+    }
+
+    await this.database.deleteBroadcast(lastBroadcast.id);
+
+    const report = `✅ عملیات حذف انجام شد.\n\n` +
+                   `🗑 ${successCount} پیام با موفقیت حذف شد.\n` +
+                   `⚠️ ${failCount} پیام حذف نشد (ممکن است توسط کاربر حذف شده باشد).`;
+
+    await this.telegram.editMessageText(chatId, messageId, report, {
+        inline_keyboard: [[{ text: "↩️ بازگشت", callback_data: "admin:broadcast" }]]
+    });
+  }
+
+  private async handleBroadcastSendNew(chatId: number, messageId: number, user: any): Promise<void> {
+    if (String(chatId) !== this.adminChatId) {
+        await this.telegram.editMessageText(chatId, messageId, BOT_MESSAGES.ADMIN_ONLY);
+        return;
+    }
+
+    const message = "❓ چگونه می‌خواهید پیام را ارسال کنید؟";
+
+    const replyMarkup: InlineKeyboardMarkup = {
+        inline_keyboard: [
+            [
+                { text: "👤 فوروارد از طرف ادمین", callback_data: "broadcast:set_method:forward" },
+                { text: "🤖 به عنوان پیام ربات", callback_data: "broadcast:set_method:bot" }
+            ],
+            [
+                { text: "↩️ بازگشت", callback_data: "admin:broadcast" }
+            ]
+        ]
+    };
+
+    await this.telegram.editMessageText(chatId, messageId, message, replyMarkup);
+  }
+
+  private async handleBroadcastAskSpecific(chatId: number, messageId: number, user: any): Promise<void> {
+    const userState = await this.state.getState(user.id);
+    if (!userState) return;
+
+    const message = "🎯 لطفاً لیست شناسه‌های چت یا نام‌های کاربری را ارسال کنید.\n\n" +
+                    "هر شناسه یا نام کاربری را در یک خط جدید وارد کنید.\n" +
+                    "مثال:\n" +
+                    "12345678\n" +
+                    "@username1\n" +
+                    "-100123456789"; // Example for a group chat ID
+
+    const replyMarkup: InlineKeyboardMarkup = {
+        inline_keyboard: [
+            [
+                { text: "↩️ بازگشت", callback_data: "broadcast:set_method:" + userState.data.method }
+            ]
+        ]
+    };
+
+    await this.telegram.editMessageText(chatId, messageId, message, replyMarkup);
+  }
+
+  private async handleBroadcastAskMessage(chatId: number, messageId: number, user: any): Promise<void> {
+    const userState = await this.state.getState(user.id);
+    if (!userState) return; // should not happen
+
+    const message = "✉️ اکنون پیام مورد نظر برای ارسال را بفرستید.\n\n" +
+                    "می‌توانید هر نوع پیامی (متن، عکس، ویدیو، فایل و...) را ارسال کنید.";
+
+    const replyMarkup: InlineKeyboardMarkup = {
+        inline_keyboard: [
+            [
+                { text: "↩️ بازگشت", callback_data: "broadcast:set_audience:" + userState.data.audience }
+            ]
+        ]
+    };
+
+    await this.telegram.editMessageText(chatId, messageId, message, replyMarkup);
   }
 
   private async handleCancelAction(chatId: number, messageId: number, user: any): Promise<void> {
     await this.state.deleteState(user.id);
-    
     const replyMarkup: InlineKeyboardMarkup = {
       inline_keyboard: [
         [{ text: "↩️ بازگشت به منوی اصلی", callback_data: "menu:help" }]
